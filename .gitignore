@@ -1,0 +1,11 @@
+node_modules
+dist
+.env
+.env.local
+*.log
+*.p8
+.DS_Store
+coverage
+.idea
+.mcp.json
+.reference

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "appstore-connect": {
+      "command": "node",
+      "args": ["/absolute/path/to/mcp-appstore-connect/dist/cli.js"],
+      "env": {
+        "APP_STORE_CONNECT_KEY_ID": "XXXXXXXXXX",
+        "APP_STORE_CONNECT_ISSUER_ID": "00000000-0000-0000-0000-000000000000",
+        "APP_STORE_CONNECT_P8_PATH": "/absolute/path/to/AuthKey_XXXXXXXXXX.p8",
+        "APP_STORE_CONNECT_VENDOR_NUMBER": "",
+        "APP_STORE_CONNECT_ALLOW_WRITES": ""
+      }
+    }
+  }
+}

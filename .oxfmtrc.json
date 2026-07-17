@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "sortImports": { "enabled": true },
+  "ignorePatterns": ["dist", "pnpm-lock.yaml", ".reference"],
+  "overrides": [
+    {
+      "files": ["**/*.json", "**/*.jsonc"],
+      "options": {
+        "trailingComma": "none"
+      }
+    }
+  ]
+}
