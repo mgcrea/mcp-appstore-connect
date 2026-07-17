@@ -1,0 +1,10 @@
+{
+  "git": {
+    "commitMessage": "release: cut the v${version} release",
+    "tagAnnotation": "v${version} release"
+  },
+  "github": {
+    "release": true,
+    "releaseName": "v${version}"
+  }
+}
