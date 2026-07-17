@@ -11,13 +11,6 @@ Model Context Protocol server for the Apple [App Store Connect API](https://deve
 - **Broad coverage** — apps, App Store versions & localizations, builds, TestFlight groups/testers/feedback, sales & finance reports, analytics, users, bundle ids & capabilities, devices.
 - **Small & typed** — two runtime deps (`@modelcontextprotocol/sdk`, `zod`), ESM, built with tsdown, linted/formatted with oxc, tested with vitest.
 
-## Install
-
-```sh
-pnpm install
-pnpm build
-```
-
 ## Configure
 
 Create a key in App Store Connect → **Users and Access → Integrations → Keys → App Store Connect API**. Apple gives you an **Issuer ID**, a **Key ID**, and a one-time **`.p8`** download. Then set:
@@ -37,20 +30,20 @@ See [.env.example](./.env.example) for the annotated list.
 
 > The API key's **role** (set when you create it) decides what it can touch. A read-only role is enough for the list/get tools; editing metadata or managing testers needs App Manager or Admin. Team-scoped keys may require a JWT `scope` claim — if a call fails with `401 NOT_AUTHORIZED`, that's the likely cause.
 
-## Run
+## Quick start
 
-```sh
-node dist/cli.js
-```
+Pick one of the three. All talk to the same App Store Connect API — the difference is only how the server is launched. Options A and B need nothing checked out.
 
-### Wire into Claude Code
+### A. npx — recommended
+
+Zero install; `npx` fetches and runs the published package. Wire it into Claude Code (or any MCP client) with your credentials:
 
 ```json
 {
   "mcpServers": {
     "appstore-connect": {
-      "command": "node",
-      "args": ["/absolute/path/to/mcp-appstore-connect/dist/cli.js"],
+      "command": "npx",
+      "args": ["-y", "@mgcrea/mcp-appstore-connect"],
       "env": {
         "APP_STORE_CONNECT_KEY_ID": "XXXXXXXXXX",
         "APP_STORE_CONNECT_ISSUER_ID": "00000000-0000-0000-0000-000000000000",
@@ -61,10 +54,62 @@ node dist/cli.js
 }
 ```
 
+To try it from a shell (reads the same env, or a local `.env`):
+
+```sh
+npx -y @mgcrea/mcp-appstore-connect
+```
+
+### B. Docker (stdio)
+
+Runs the container image published to GHCR. The `.p8` never goes into the image or the config — mount it read-only and point `APP_STORE_CONNECT_P8_PATH` at the in-container path. The `-e VAR` (no value) flags forward the key id / issuer id from the `env` block, so no secret sits in `args`:
+
+```json
+{
+  "mcpServers": {
+    "appstore-connect": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "APP_STORE_CONNECT_KEY_ID",
+        "-e",
+        "APP_STORE_CONNECT_ISSUER_ID",
+        "-e",
+        "APP_STORE_CONNECT_P8_PATH=/keys/key.p8",
+        "-v",
+        "/absolute/path/to/AuthKey_XXXXXXXXXX.p8:/keys/key.p8:ro",
+        "ghcr.io/mgcrea/mcp-appstore-connect:latest"
+      ],
+      "env": {
+        "APP_STORE_CONNECT_KEY_ID": "XXXXXXXXXX",
+        "APP_STORE_CONNECT_ISSUER_ID": "00000000-0000-0000-0000-000000000000"
+      }
+    }
+  }
+}
+```
+
+`-i` keeps stdin open, which the stdio transport needs — don't drop it. The left side of `-v` is the host path to your `.p8`; the container only ever sees `/keys/key.p8`. The same image is mirrored on Docker Hub as `mgcrea/mcp-appstore-connect` if you prefer that registry.
+
+### C. From source (development)
+
+```sh
+git clone https://github.com/mgcrea/mcp-appstore-connect.git
+cd mcp-appstore-connect
+pnpm install
+pnpm build
+node dist/cli.js        # reads a local .env
+```
+
+Or wire the built entry directly: `"command": "node"`, `"args": ["/absolute/path/to/mcp-appstore-connect/dist/cli.js"]`.
+
 ### Inspect the tools
 
 ```sh
-npx @modelcontextprotocol/inspector node dist/cli.js
+npx @modelcontextprotocol/inspector npx -y @mgcrea/mcp-appstore-connect
 ```
 
 ## Tools
@@ -106,6 +151,10 @@ pnpm format         # oxfmt --write .
 ```
 
 Tests run entirely offline: JWT signing is verified against a throwaway P-256 key, and the tools are driven over an in-memory MCP transport with a mocked `fetch`.
+
+### Publish
+
+Options A (npx) and B (Docker) resolve only once a release is out: pushing to `main` or a `v*.*.*` tag triggers CI to build and push the image to `ghcr.io/mgcrea/mcp-appstore-connect`, and `npm publish` (which runs `pnpm build` via `prepublishOnly`) ships the package. Until then, use Option C from source.
 
 ## License
 
