@@ -14,7 +14,10 @@
   "license": "MIT",
   "author": "Olivier Louvignes <olivier@mgcrea.io>",
   "bin": {
-    "appstore-connect-mcp": "./dist/cli.js"
+    "appstore-connect-mcp": "dist/cli.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "dist"
