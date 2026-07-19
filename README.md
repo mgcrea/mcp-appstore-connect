@@ -203,6 +203,8 @@ npx @modelcontextprotocol/inspector npx -y @mgcrea/mcp-appstore-connect
 
 **Review submissions** — `list_review_submissions`, _`submit_version_for_review`_\*†, _`cancel_review_submission`_\*† — hand a finished version to Apple for review, or withdraw it
 
+**Release** — _`release_version`_\*† — release an approved version sitting in `PENDING_DEVELOPER_RELEASE` (the manual "Release This Version" button)
+
 **App info** — `list_app_infos`, `list_app_info_localizations`, `get_app_info_localization`, _`update_app_info_localization`_\* (name, subtitle, privacy policy — the fields that outlive a version)
 
 **In-app purchases** — `list_in_app_purchases`, `get_in_app_purchase`, `list_iap_price_points`, `get_iap_price_schedule`, _`set_in_app_purchase_price`_\*† — read the price-point catalogue for a territory, then price the IAP against one. One-time purchases only; auto-renewable subscriptions are not covered.

@@ -358,6 +358,22 @@ Approval is not release. A version created with `releaseType: MANUAL` sits in
 `PENDING_DEVELOPER_RELEASE` until someone releases it, which is usually what you want:
 it keeps the release moment under the user's control.
 
+### Release
+
+```
+app_store_connect_release_version { versionId, confirm: true }
+```
+
+Only for a version already in `PENDING_DEVELOPER_RELEASE` — `AFTER_APPROVAL` and
+`SCHEDULED` versions release themselves, and there is nothing to press. The state flips to
+`READY_FOR_SALE` a moment after the request, so re-read it with `list_versions` rather than
+trusting the response.
+
+**Ask before releasing, every time.** The whole point of `MANUAL` is that a human picks the
+moment, so a release the user did not ask for in this turn overrides the choice they already
+made. It is also effectively irreversible: pulling a released version means removing the app
+from sale.
+
 ### Submitting from a dirty tree
 
 If the changes going into the binary are uncommitted, **say so before submitting**. A
