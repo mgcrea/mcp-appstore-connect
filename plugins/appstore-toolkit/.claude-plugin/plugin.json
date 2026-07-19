@@ -2,7 +2,7 @@
   "name": "appstore-toolkit",
   "displayName": "App Store toolkit",
   "description": "Prepare an Xcode app for the App Store: write the CHANGELOG entry and every App Store Connect metadata field, and round-trip the listing through App Store Connect.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Olivier Louvignes",
     "url": "https://github.com/mgcrea"
@@ -22,14 +22,7 @@
   "mcpServers": {
     "appstore-connect": {
       "command": "npx",
-      "args": ["-y", "@mgcrea/mcp-appstore-connect"],
-      "env": {
-        "APP_STORE_CONNECT_KEY_ID": "${APP_STORE_CONNECT_KEY_ID}",
-        "APP_STORE_CONNECT_ISSUER_ID": "${APP_STORE_CONNECT_ISSUER_ID}",
-        "APP_STORE_CONNECT_P8_PATH": "${APP_STORE_CONNECT_P8_PATH}",
-        "APP_STORE_CONNECT_VENDOR_NUMBER": "${APP_STORE_CONNECT_VENDOR_NUMBER}",
-        "APP_STORE_CONNECT_ALLOW_WRITES": "${APP_STORE_CONNECT_ALLOW_WRITES}"
-      }
+      "args": ["-y", "@mgcrea/mcp-appstore-connect"]
     }
   }
 }

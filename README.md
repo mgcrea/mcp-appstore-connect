@@ -79,6 +79,34 @@ Create a key in App Store Connect → **Users and Access → Integrations → Ke
 
 See [.env.example](./.env.example) for the annotated list.
 
+### Config file
+
+If you'd rather not put credentials in your shell profile or in every MCP client config, the server reads a config file instead:
+
+```jsonc
+// ~/.config/appstore-connect/config.json   (chmod 600)
+{
+  "keyId": "XXXXXXXXXX",
+  "issuerId": "00000000-0000-0000-0000-000000000000",
+  "p8Path": "~/path/to/AuthKey_XXXXXXXXXX.p8",
+  "allowWrites": true,
+}
+```
+
+```sh
+mkdir -p ~/.config/appstore-connect
+$EDITOR ~/.config/appstore-connect/config.json
+chmod 600 ~/.config/appstore-connect/config.json
+```
+
+With this in place an MCP client needs no `env` block at all — just `npx -y @mgcrea/mcp-appstore-connect`.
+
+- **The environment wins, field by field.** A config file supplies whatever the environment doesn't, so Docker and CI keep working exactly as before, and a one-off `APP_STORE_CONNECT_ALLOW_WRITES=0` still overrides a file that says `true`.
+- Keys are camelCase (`keyId`, not `APP_STORE_CONNECT_KEY_ID`), `~` is expanded in `p8Path`, and `p8` takes an inline PEM as the alternative to `p8Path`.
+- **Unknown keys are an error**, not ignored — a typo'd `keyID` tells you so instead of silently falling back to the environment.
+- Location: `$APP_STORE_CONNECT_CONFIG`, else `$XDG_CONFIG_HOME/appstore-connect/config.json`, else `~/.config/appstore-connect/config.json`. An absent file is fine; a malformed one is reported with its path.
+- The server warns on stderr if the file is readable by other users.
+
 > The API key's **role** (set when you create it) decides what it can touch. A read-only role is enough for the list/get tools; editing metadata or managing testers needs App Manager or Admin. Team-scoped keys may require a JWT `scope` claim — if a call fails with `401 NOT_AUTHORIZED`, that's the likely cause.
 
 ## Quick start
@@ -105,7 +133,7 @@ Zero install; `npx` fetches and runs the published package. Wire it into Claude 
 }
 ```
 
-To try it from a shell (reads the same env, or a local `.env`):
+To try it from a shell (reads the same env, or the [config file](#config-file)):
 
 ```sh
 npx -y @mgcrea/mcp-appstore-connect
@@ -152,7 +180,7 @@ git clone https://github.com/mgcrea/mcp-appstore-connect.git
 cd mcp-appstore-connect
 pnpm install
 pnpm build
-node dist/cli.js        # reads a local .env
+node dist/cli.js        # credentials from the env or the config file
 ```
 
 Or wire the built entry directly: `"command": "node"`, `"args": ["/absolute/path/to/mcp-appstore-connect/dist/cli.js"]`.
@@ -259,20 +287,13 @@ and every store field within Apple's limits, and pushes the result back through
 ```
 
 Installing it also wires up the `appstore-connect` MCP server, so the skill and the tools it
-calls arrive together. The server config reads these from your shell environment — nothing is
-stored in the plugin:
+calls arrive together. The plugin stores **no credentials of its own** — set up the
+[config file](#config-file) once and the server finds them wherever you work.
 
-| Variable                          | Required                         |
-| --------------------------------- | -------------------------------- |
-| `APP_STORE_CONNECT_KEY_ID`        | yes                              |
-| `APP_STORE_CONNECT_ISSUER_ID`     | yes                              |
-| `APP_STORE_CONNECT_P8_PATH`       | yes                              |
-| `APP_STORE_CONNECT_VENDOR_NUMBER` | only for `download_sales_report` |
-| `APP_STORE_CONNECT_ALLOW_WRITES`  | set to `1` to expose write tools |
-
-`apply_listing` is a write tool, so it stays hidden until `APP_STORE_CONNECT_ALLOW_WRITES=1`.
-That is deliberate: installing a plugin should not silently grant it permission to overwrite a
-live App Store listing.
+`apply_listing` is a write tool, so it stays hidden until writes are enabled
+(`"allowWrites": true` in the config file, or `APP_STORE_CONNECT_ALLOW_WRITES=1`). That is
+deliberate: installing a plugin should not silently grant it permission to overwrite a live
+App Store listing.
 
 The skill also ships an offline auditor (`scripts/audit_release.py`, stdlib Python, no network
 calls) that measures every field against its limit and exits non-zero when one is over or
