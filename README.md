@@ -118,6 +118,8 @@ npx @modelcontextprotocol/inspector npx -y @mgcrea/mcp-appstore-connect
 
 **Versions & metadata** — `list_versions`, `list_version_localizations`, `get_version_localization`, _`create_version`_\*, _`update_version_localization`_\* (description, keywords, what's-new, promo text)
 
+**Screenshots** — `list_screenshot_sets`, `list_screenshots`, `get_screenshot`, _`upload_screenshot`_\*, _`delete_screenshot`_\*†, _`delete_screenshot_set`_\*†, _`reorder_screenshots`_\*†
+
 **Builds** — `list_builds`
 
 **TestFlight** — `list_beta_groups`, `list_beta_testers`, `list_beta_feedback`, _`invite_beta_tester`_\*, _`add_tester_to_group`_\*, _`remove_tester_from_group`_\*†
@@ -139,6 +141,9 @@ Tool names are prefixed `app_store_connect_` (omitted above for brevity).
 - **Tokens are minted locally.** Each request carries a fresh-enough ES256 JWT (`aud: appstoreconnect-v1`), cached and re-signed shortly before Apple's 20-minute cap. The `.p8` never leaves your machine.
 - **Reports are TSV, not JSON.** `download_sales_report` / `download_finance_report` gunzip Apple's report and return the text (truncated to `maxLines`). Reports lag ~24–48h and are keyed by date/frequency.
 - **Analytics is asynchronous.** Create a report request, wait for Apple to generate it, then list its reports.
+- **`upload_screenshot` reads the file server-side.** Pass an absolute `filePath` the server can reach. Under Docker that means a path _inside_ the container — mount the folder (`-v /host/screenshots:/screenshots`) and pass the container path, or send small images inline as base64 via `fileData`.
+- **Screenshots validate after upload.** Apple checks pixel dimensions asynchronously, so a wrongly-sized image fails during processing rather than at upload; the tool waits (`waitSeconds`, default 60) and reports Apple's exact reason. Timing out is not a failure — the upload already succeeded, so poll `get_screenshot` instead of retrying. The version must be editable (`PREPARE_FOR_SUBMISSION` or `DEVELOPER_REJECTED`), and a set holds at most 10 screenshots.
+- **Screenshot order is explicit.** `reorder_screenshots` replaces a set's full contents, so pass every id you want to keep — an omitted one is removed from the set.
 
 ## Develop
 

@@ -6,6 +6,7 @@ import { registerBuildTools } from "./builds.js";
 import { registerBundleIdTools } from "./bundleids.js";
 import { registerDeviceTools } from "./devices.js";
 import { registerReportTools } from "./reports.js";
+import { registerScreenshotTools } from "./screenshots.js";
 import { registerTestflightTools } from "./testflight.js";
 import { registerUserTools } from "./users.js";
 import { registerVersionTools } from "./versions.js";
@@ -30,6 +31,7 @@ export const registerTools = (
   const { allowWrites } = ctx;
   registerAppTools(server, client, allowWrites);
   registerVersionTools(server, client, allowWrites);
+  registerScreenshotTools(server, client, allowWrites);
   registerBuildTools(server, client, allowWrites);
   registerTestflightTools(server, client, allowWrites);
   registerReportTools(server, client, ctx);
