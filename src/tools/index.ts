@@ -1,10 +1,12 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import type { AppStoreConnectClient } from "../client/asc.js";
+import { registerAppInfoTools } from "./appinfos.js";
 import { registerAppTools } from "./apps.js";
 import { registerBuildTools } from "./builds.js";
 import { registerBundleIdTools } from "./bundleids.js";
 import { registerDeviceTools } from "./devices.js";
+import { registerListingTools } from "./listing.js";
 import { registerReportTools } from "./reports.js";
 import { registerScreenshotTools } from "./screenshots.js";
 import { registerTestflightTools } from "./testflight.js";
@@ -31,6 +33,8 @@ export const registerTools = (
   const { allowWrites } = ctx;
   registerAppTools(server, client, allowWrites);
   registerVersionTools(server, client, allowWrites);
+  registerAppInfoTools(server, client, allowWrites);
+  registerListingTools(server, client, allowWrites);
   registerScreenshotTools(server, client, allowWrites);
   registerBuildTools(server, client, allowWrites);
   registerTestflightTools(server, client, allowWrites);

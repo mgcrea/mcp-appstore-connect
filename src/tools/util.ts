@@ -11,6 +11,14 @@ export const ok = (data: unknown): ToolResult => ({
   content: [{ type: "text", text: JSON.stringify(data ?? { ok: true }, null, 2) }],
 });
 
+/**
+ * Return text as-is. `ok()` JSON-stringifies, which turns a markdown document
+ * into one escaped "# Locale\n\n…" line that no one can read.
+ */
+export const okText = (text: string): ToolResult => ({
+  content: [{ type: "text", text }],
+});
+
 export const fail = (message: string, extra?: unknown): ToolResult => ({
   content: [
     {
@@ -21,21 +29,37 @@ export const fail = (message: string, extra?: unknown): ToolResult => ({
   isError: true,
 });
 
+/** Render a thrown value as a tool error, preserving App Store Connect detail. */
+export const toFailure = (err: unknown): ToolResult => {
+  if (err instanceof AppStoreConnectApiError) {
+    return fail(err.message, { status: err.status, errors: err.errors });
+  }
+  if (err instanceof WritesDisabledError) {
+    return fail(err.message);
+  }
+  if (err instanceof Error) {
+    // Let an error carry structured detail through, e.g. per-field limit breaches.
+    const details = (err as Error & { details?: unknown }).details;
+    return fail(err.message, details);
+  }
+  return fail("Unknown error", err);
+};
+
 /** Run a tool body, JSON-formatting the result and turning errors into a tool error. */
 export const wrap = async <T>(fn: () => Promise<T>): Promise<ToolResult> => {
   try {
     return ok(await fn());
   } catch (err) {
-    if (err instanceof AppStoreConnectApiError) {
-      return fail(err.message, { status: err.status, errors: err.errors });
-    }
-    if (err instanceof WritesDisabledError) {
-      return fail(err.message);
-    }
-    if (err instanceof Error) {
-      return fail(err.message);
-    }
-    return fail("Unknown error", err);
+    return toFailure(err);
+  }
+};
+
+/** Like `wrap`, but the body chooses its own result shape (e.g. raw markdown). */
+export const wrapResult = async (fn: () => Promise<ToolResult>): Promise<ToolResult> => {
+  try {
+    return await fn();
+  } catch (err) {
+    return toFailure(err);
   }
 };
 
