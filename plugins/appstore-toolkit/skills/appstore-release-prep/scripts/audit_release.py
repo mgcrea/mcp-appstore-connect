@@ -252,8 +252,97 @@ STORE_DOC_CANDIDATES = (
 )
 
 
-METADATA_ROOT = "fastlane/metadata"
-SIDECAR = f"{METADATA_ROOT}/.listing.json"
+DEFAULT_METADATA_ROOT = "fastlane/metadata"
+SIDECAR_BASENAME = ".listing.json"
+
+# Mirrors LOCALE_PATTERN in src/listing/manifest.ts. Only needed because the
+# root can now be the repo root, where "src" and "docs" sit next to "en-US".
+LOCALE_DIR_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
+
+# Directories that never hold store metadata but do hold thousands of files.
+PRUNE_DIRS = {".git", "node_modules", "Pods", "build", "DerivedData", ".build",
+              "vendor", ".venv", "Carthage"}
+
+
+def normalize_metadata_root(raw):
+    """Canonical form of a metadata root: relative, POSIX, no trailing slash.
+
+    Mirrors normalizeMetadataRoot() in src/listing/document.ts -- change both
+    together. "" means the repo root.
+    """
+    unix = re.sub(r"/+", "/", raw.replace("\\", "/"))
+    if unix.startswith("/") or re.match(r"^[A-Za-z]:", unix):
+        raise SystemExit(
+            f"--metadata-root {raw!r} is absolute. Give a path relative to the repo "
+            f"root, e.g. {DEFAULT_METADATA_ROOT!r}, or '.' for the repo root itself.")
+    trimmed = re.sub(r"^\./", "", unix).rstrip("/")
+    if trimmed in ("", "."):
+        return ""
+    for segment in trimmed.split("/"):
+        if segment in ("", ".", ".."):
+            raise SystemExit(
+                f"--metadata-root {raw!r} must be a plain relative path. "
+                f"Write it out in full, e.g. {DEFAULT_METADATA_ROOT!r}.")
+        if segment == SIDECAR_BASENAME:
+            raise SystemExit(
+                f"--metadata-root {raw!r} points at {SIDECAR_BASENAME} itself. The root "
+                f"is the directory that contains it, e.g. {DEFAULT_METADATA_ROOT!r}.")
+    return trimmed
+
+
+def find_sidecars(repo, max_depth=4):
+    """Every .listing.json in the repo, repo-relative, shallowest first."""
+    found = []
+    for dirpath, dirnames, filenames in os.walk(repo):
+        rel = os.path.relpath(dirpath, repo)
+        depth = 0 if rel == "." else rel.count(os.sep) + 1
+        if depth >= max_depth:
+            dirnames[:] = []
+        else:
+            dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
+        if SIDECAR_BASENAME in filenames:
+            found.append("" if rel == "." else rel.replace(os.sep, "/"))
+    return sorted(found, key=lambda p: (p.count("/"), p))
+
+
+def find_metadata_root(repo, override=None):
+    """Where this repo keeps its metadata tree, or None for markdown-doc mode.
+
+    The miss rule is deliberately asymmetric. An explicit --metadata-root that
+    is not there is a user error and must stop the audit: falling through would
+    report "file does not exist -- every field needs writing from scratch",
+    which reads as "no listing exists yet" and gets live store copy rewritten.
+    An absent default is just this repo not using a tree, which is fine.
+    """
+    if override is not None:
+        root = normalize_metadata_root(override)
+        if not os.path.isdir(os.path.join(repo, root) if root else repo):
+            raise SystemExit(
+                f"--metadata-root {override!r} is not a directory under {repo}. "
+                f"Nothing was audited. Check the path, or drop the flag to let the "
+                f"tree be found from its {SIDECAR_BASENAME}.")
+        return root
+
+    sidecars = find_sidecars(repo)
+    if len(sidecars) > 1:
+        listed = ", ".join(f"{s}/{SIDECAR_BASENAME}" if s else SIDECAR_BASENAME
+                           for s in sidecars)
+        raise SystemExit(
+            f"Found more than one {SIDECAR_BASENAME} ({listed}). Pass --metadata-root "
+            f"to say which tree to audit.")
+    if len(sidecars) == 1:
+        return sidecars[0]
+
+    # No sidecar: a hand-authored tree at the conventional path still counts. A
+    # tree that was moved and has no sidecar needs the flag.
+    if os.path.isdir(os.path.join(repo, DEFAULT_METADATA_ROOT)):
+        return DEFAULT_METADATA_ROOT
+    return None
+
+
+def under_root(root, *parts):
+    """Join below a metadata root, tolerating the repo-root ("") case."""
+    return "/".join([p for p in (root, *parts) if p])
 
 # fastlane deliver's filenames -> this script's canonical field names. The
 # appstore-connect MCP's export_listing writes exactly this tree, so an exported
@@ -290,9 +379,9 @@ SIDECAR_FIELD_KEYS = {
 APPINFO_FIELDS = {"NAME", "SUBTITLE", "PRIVACY URL"}
 
 
-def read_sidecar(repo):
+def read_sidecar(repo, root):
     """The export's record of what was live: ids, version state, per-field digests."""
-    full = os.path.join(repo, SIDECAR)
+    full = os.path.join(repo, *filter(None, [root, SIDECAR_BASENAME]))
     if not os.path.exists(full):
         return None
     try:
@@ -302,7 +391,7 @@ def read_sidecar(repo):
         return None  # a broken sidecar should not stop the audit
 
 
-def find_metadata_locales(repo, override=None):
+def find_metadata_locales(repo, root, override=None):
     """Every locale directory under the metadata root, primary first.
 
     Auditing only one locale is a trap: export_listing writes every locale, and
@@ -310,32 +399,33 @@ def find_metadata_locales(repo, override=None):
     audit that measures en-US alone reports clean and then the push refuses
     everything, naming a locale the user was never shown a count for.
     """
-    root = os.path.join(repo, METADATA_ROOT)
-    if not os.path.isdir(root):
+    full = os.path.join(repo, root) if root else repo
+    if not os.path.isdir(full):
         return []
-    locales = sorted(d for d in os.listdir(root)
-                     if os.path.isdir(os.path.join(root, d)))
+    locales = sorted(d for d in os.listdir(full)
+                     if os.path.isdir(os.path.join(full, d))
+                     and LOCALE_DIR_RE.match(d))
     if not locales:
         return []
     if override:
         return [override] if override in locales else []
-    sidecar = read_sidecar(repo) or {}
+    sidecar = read_sidecar(repo, root) or {}
     primary = sidecar.get("app", {}).get("primaryLocale")
     if primary not in locales:
         primary = "en-US" if "en-US" in locales else locales[0]
     return [primary] + [l for l in locales if l != primary]
 
 
-def read_metadata_locale(repo, locale, sidecar=None):
+def read_metadata_locale(repo, root, locale, sidecar=None):
     """
-    Read the store fields from fastlane/metadata/<locale>/*.txt.
+    Read the store fields from <metadata-root>/<locale>/*.txt.
 
     One file per field means there is nothing to parse: the file content IS the
     value. That removes the entire class of failure the heading parser below has
     to defend against -- a description whose own subheadings look like field
     boundaries, which then measures short and quietly passes a limit it busts.
     """
-    base = os.path.join(repo, METADATA_ROOT, locale)
+    base = os.path.join(repo, *filter(None, [root, locale]))
     baseline = ((sidecar or {}).get("baseline", {}) or {}).get(locale, {}) or {}
     fields, edited = {}, []
     for filename, name in METADATA_FILE_FIELDS.items():
@@ -350,7 +440,7 @@ def read_metadata_locale(repo, locale, sidecar=None):
         n = char_count(content)
         entry = {"chars": n, "limit": limit, "over_by": max(0, n - limit),
                  "ok": n <= limit, "text": content,
-                 "file": f"{METADATA_ROOT}/{locale}/{filename}"}
+                 "file": under_root(root, locale, filename)}
         # Compare against the digest recorded at export. This is the whole
         # "which files do I pass to apply_listing" question, answered offline:
         # anything whose digest moved is an edit waiting to be pushed.
@@ -364,20 +454,22 @@ def read_metadata_locale(repo, locale, sidecar=None):
         fields[name] = entry
     return {
         "locale": locale,
-        "path": f"{METADATA_ROOT}/{locale}/",
+        "path": f"{under_root(root, locale)}/",
         "fields": fields,
         "missing": sorted(set(FIELD_LIMITS) - set(fields)),
         "edited_since_export": edited,
     }
 
 
-def read_metadata_tree(repo, locales):
-    sidecar = read_sidecar(repo)
-    entries = [read_metadata_locale(repo, l, sidecar) for l in locales]
+def read_metadata_tree(repo, root, locales):
+    sidecar = read_sidecar(repo, root)
+    entries = [read_metadata_locale(repo, root, l, sidecar) for l in locales]
     return {
         "exists": True,
         "source": "metadata-dir",
-        "path": f"{METADATA_ROOT}/",
+        "root": root,
+        "path": f"{root}/" if root else "",
+        "sidecar_path": under_root(root, SIDECAR_BASENAME),
         "sidecar": sidecar_summary(sidecar),
         "locales": entries,
         # The primary locale is what the prose checks and the live diff act on;
@@ -687,7 +779,7 @@ def version_key(v):
     return tuple(int(p) if p.isdigit() else 0 for p in v.split("."))
 
 
-def audit(repo, fields_file=None, live_fields=None, locale=None):
+def audit(repo, fields_file=None, live_fields=None, locale=None, metadata_root=None):
     versions = read_versions(repo)
     cl = parse_changelog(repo)
     dated = [v for v in cl["versions"] if v["version"].lower() != "unreleased" and v["date"]]
@@ -710,18 +802,19 @@ def audit(repo, fields_file=None, live_fields=None, locale=None):
     # A fastlane metadata tree is unambiguous, so prefer it; an explicit
     # --fields-file still wins, and a project without the tree keeps the
     # markdown-doc parser it has always used.
-    metadata_locales = [] if fields_file else find_metadata_locales(repo, locale)
+    root = None if fields_file else find_metadata_root(repo, metadata_root)
+    metadata_locales = [] if root is None else find_metadata_locales(repo, root, locale)
     if metadata_locales:
-        store = read_metadata_tree(repo, metadata_locales)
+        store = read_metadata_tree(repo, root, metadata_locales)
         # The prose lives in several files now, so the em-dash scan takes a list.
         # Every locale is scanned: copy written by a translator drifts the same way.
-        prose = [f"{METADATA_ROOT}/{loc}/{n}"
+        prose = [under_root(root, loc, n)
                  for loc in metadata_locales
                  for n in ("description.txt", "release_notes.txt",
                            "promotional_text.txt", "subtitle.txt")]
         # screenshot_sync wants one document to look for taglines in; the primary
         # locale's description is where a tagline would appear.
-        store_doc = f"{METADATA_ROOT}/{metadata_locales[0]}/description.txt"
+        store_doc = under_root(root, metadata_locales[0], "description.txt")
     else:
         store_doc = find_store_doc(repo, fields_file)
         store = parse_store_fields(repo, store_doc)
@@ -800,7 +893,7 @@ def report(a):
     s = a["store"]
     sidecar = s.get("sidecar")
     if sidecar:
-        L.append("EXPORTED LISTING  (fastlane/metadata/.listing.json)")
+        L.append(f"EXPORTED LISTING  ({s.get('sidecar_path', SIDECAR_BASENAME)})")
         L.append(f"  version {sidecar['version']}  state {sidecar['app_store_state'] or 'unknown'}"
                  f"  exported {sidecar['exported_at']}")
         if not sidecar["editable"]:
@@ -899,9 +992,14 @@ def main():
                     help="Repo-relative path to the store-copy doc. Auto-detected when omitted "
                          "(APPSTORE.md, STORES.md, ...).")
     ap.add_argument("--locale", default=None,
-                    help="Narrow the audit to ONE locale under fastlane/metadata/. Every locale "
+                    help="Narrow the audit to ONE locale under the metadata root. Every locale "
                          "is audited by default, because apply_listing refuses the whole push if "
                          "any single locale is over limit.")
+    ap.add_argument("--metadata-root", default=None,
+                    help="Repo-relative path to the metadata tree. Auto-detected from a "
+                         ".listing.json, else fastlane/metadata; a tree that was moved and has no "
+                         "sidecar needs this flag. If the path given does not exist the audit "
+                         "fails rather than falling back to the markdown-doc parser.")
     ap.add_argument("--live-fields", default=None,
                     help="JSON file of the LIVE App Store Connect fields, to diff against the "
                          "local doc. Accepts API keys (description, keywords, promotionalText, "
@@ -920,7 +1018,8 @@ def main():
             row = (data[0] if isinstance(data, list) and data else data) or {}
             live_fields = row.get("attributes", row)
 
-    a = audit(repo, fields_file=args.fields_file, live_fields=live_fields, locale=args.locale)
+    a = audit(repo, fields_file=args.fields_file, live_fields=live_fields, locale=args.locale,
+              metadata_root=args.metadata_root)
     if args.json:
         json.dump(a, sys.stdout, indent=2)
         print()

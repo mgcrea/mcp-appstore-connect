@@ -26,10 +26,13 @@ never announced, every store field measured against Apple's limit, em dashes in
 prose, and screenshot-config drift. It exits non-zero if a field is over or missing,
 so it can gate a release.
 
-The source is auto-detected: a `fastlane/metadata/<locale>/` tree wins, else
-`APPSTORE.md`, `STORES.md` and friends. Pass `--fields-file <path>` to force a
-document, or `--locale` to audit a locale other than the primary one. **Check the
-source it reports** — the header says which file or directory the numbers came from.
+The source is auto-detected: a metadata tree wins, else `APPSTORE.md`, `STORES.md`
+and friends. The tree is found from its `.listing.json` wherever that sits, falling
+back to `fastlane/metadata/`; pass `--metadata-root <path>` for a tree that was moved
+and has no sidecar, or when the repo holds more than one. Pass `--fields-file <path>`
+to force a document, or `--locale` to audit a locale other than the primary one.
+**Check the source it reports** — the header says which file or directory the numbers
+came from.
 If it reports "file does not exist" for a project that plainly has store copy, you
 pointed it at the wrong place; do not take that as license to write every field from
 scratch, or you will replace live copy with a rewrite nobody asked for.
@@ -48,10 +51,13 @@ With `@mgcrea/mcp-appstore-connect`, pull the whole listing into the repo:
 app_store_connect_export_listing { appId }        # version defaults to "latest"
 ```
 
-It returns `{path, content}` pairs; write them as-is. The result is a
-`fastlane/metadata/<locale>/` tree — one plain-text file per field, for **every** locale —
-plus `fastlane/metadata/.listing.json`, which carries the App Store Connect ids and a
-digest of every field as it was at export. Commit all of it, including the sidecar.
+It returns `{path, content}` pairs; write them as-is, at the paths it gives you. The
+result is a `<root>/<locale>/` tree — one plain-text file per field, for **every** locale —
+plus `<root>/.listing.json`, which carries the App Store Connect ids and a digest of every
+field as it was at export. Commit all of it, including the sidecar. The root is
+`fastlane/metadata/` unless this server or repo is configured otherwise, so read the paths
+rather than assuming them; `apply_listing` later locates the tree from wherever the sidecar
+sits, so never move the sidecar out of its tree.
 
 **Check which version you just exported.** `latest` does not mean "the one being
 prepared" — it means the highest-precedence version that exists, and when no editable
@@ -182,7 +188,8 @@ optional, and a **first** version must not carry release notes at all (Apple rej
 What's New on 1.0). The audit distinguishes these: `MISSING` gates the release, `unset` is
 just telling you the field is empty.
 
-In a metadata tree, each field is its own file under `fastlane/metadata/<locale>/`:
+In a metadata tree, each field is its own file under `<root>/<locale>/` (the audit
+header tells you the root; `fastlane/metadata/` by default):
 `release_notes.txt` (What's New), `promotional_text.txt`, `description.txt`,
 `keywords.txt`, `subtitle.txt`, `name.txt`, and `marketing_url.txt` /
 `support_url.txt` / `privacy_url.txt`. Write the exact copy
