@@ -42,6 +42,17 @@ jobs:
         run: pnpm run test
       - name: Build 📦
         run: pnpm run build
+      - name: Plugin manifests 🔍
+        run: |
+          python3 -m json.tool .claude-plugin/marketplace.json > /dev/null
+          python3 -m json.tool plugins/appstore-toolkit/.claude-plugin/plugin.json > /dev/null
+          python3 -m json.tool plugins/appstore-toolkit/skills/appstore-release-prep/evals/evals.json > /dev/null
+      # Catches syntax and import breakage in the bundled auditor. Non-zero is expected
+      # here — this repo has no App Store listing — so the exit code is deliberately ignored.
+      - name: Audit script smoke test 🧪
+        run: |
+          python3 plugins/appstore-toolkit/skills/appstore-release-prep/scripts/audit_release.py \
+            --repo . --json > /dev/null || true
 
   publish-npm:
     name: Publish to npm

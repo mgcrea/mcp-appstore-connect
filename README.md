@@ -9,10 +9,58 @@ Model Context Protocol server for the Apple [App Store Connect API](https://deve
 
 ## Features
 
-- **Local ES256 JWT auth** — signs short-lived App Store Connect tokens from your `.p8` key with Node's built-in crypto (no `jsonwebtoken`/`jose` dependency).
-- **Read by default, writes opt-in** — mutating tools are not even registered unless `APP_STORE_CONNECT_ALLOW_WRITES=1`; destructive ones additionally require `confirm: true`.
 - **Broad coverage** — apps, App Store versions & localizations, builds, TestFlight groups/testers/feedback, sales & finance reports, analytics, users, bundle ids & capabilities, devices.
-- **Small & typed** — two runtime deps (`@modelcontextprotocol/sdk`, `zod`), ESM, built with tsdown, linted/formatted with oxc, tested with vitest.
+- **Listing round-trip** — export the whole store listing to a git-committable metadata tree, edit it locally, apply it back with digest-based conflict detection.
+- **Read by default, writes opt-in** — mutating tools are not registered at all unless you ask for them. See [Security](#security).
+- **Typed & tested** — ESM, built with tsdown, linted/formatted with oxc, tested with vitest. Tests run fully offline.
+
+## Security
+
+You are pointing an AI agent at the account that ships your apps, so the honest details matter more than reassurance.
+
+### Supply chain
+
+**Two direct dependencies:** `@modelcontextprotocol/sdk` and `zod`. Nothing else is chosen by us.
+
+Being straight about what that actually costs: those two pull in **~94 packages** transitively — the number `npm install` prints, and every one of them arrives via the official MCP SDK. That's the honest figure, not "two dependencies". Two things keep the real exposure much smaller than 94:
+
+- **Nothing runs at install time.** Not one package in the tree declares a `preinstall`, `install` or `postinstall` script, so `npm install` executes no third-party code — the most common supply-chain attack path simply isn't open.
+- **Only 5 are reachable when the server runs:** the SDK, `zod`, `ajv`, `ajv-formats` and `zod-to-json-schema`. This server speaks **stdio only**, so the SDK's HTTP/SSE/OAuth stack (`express`, `hono`, `jose`, `cors`, `pkce-challenge`, `eventsource`) sits in the tree but is never imported.
+
+Check all of it yourself:
+
+```sh
+npm view @mgcrea/mcp-appstore-connect dependencies       # the two
+npm ls --omit=dev --all                                  # the ~94
+grep -hoE '^import[^;]*from "[^"]+"' node_modules/@mgcrea/mcp-appstore-connect/dist/*.js
+```
+
+That last command prints everything the shipped bundle imports — the SDK's stdio entrypoints, `zod`, and Node builtins. Nothing else.
+
+### Verified builds
+
+Neither artifact is published from a laptop:
+
+- **npm** — published by CI through [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) (OIDC), so there is no long-lived `NPM_TOKEN` in existence to leak, plus a [provenance attestation](https://docs.npmjs.com/generating-provenance-statements).
+- **Container** — build provenance, an SBOM, and a [cosign](https://github.com/sigstore/cosign) keyless signature.
+
+Both trace back to the exact commit and CI run that produced them. The commands to check are in [Verify](#verify) — please run them rather than take this section's word for it.
+
+### Your credentials
+
+**The `.p8` never leaves your machine, and never goes over the wire.** Tokens are minted locally: the server signs short-lived ES256 JWTs (20-minute cap, re-signed just before expiry) using Node's built-in `node:crypto`. There is no `jsonwebtoken` or `jose` in the signing path — one less dependency between your private key and the network. Under Docker the key is mounted read-only and is never baked into the image.
+
+**The server never writes to your disk.** `export_listing` hands back `{path, content}` pairs and your agent writes them, so every file write stays under your own MCP client's permission prompt rather than happening invisibly inside the server.
+
+### Blast radius
+
+Three independent limits, smallest first:
+
+1. **Writes are off by default.** Mutating tools aren't merely refused when `APP_STORE_CONNECT_ALLOW_WRITES=1` is unset — they are never registered, so they don't appear in the tool list and a confused agent cannot call them. The default install is read-only.
+2. **Destructive tools need `confirm: true`.** Deleting a screenshot or removing a tester takes an explicit acknowledgement argument, so it can't happen as a side effect of some broader request.
+3. **Your API key's role is the real ceiling**, and this server can't raise it. A read-only role is enough for every list/get tool; issue one of those and no bug here can write anything. Scope the key to the narrowest role that does your job.
+
+Applying a listing has its own rails — digest-based conflict detection, an `allowClear` gate before any field is emptied, and a whole-apply abort if any field is over Apple's limit. See [Listing round-trip](#listing-round-trip).
 
 ## Configure
 
@@ -143,6 +191,9 @@ _Italic\*_ tools are writes, hidden unless `APP_STORE_CONNECT_ALLOW_WRITES=1`. �
 
 Tool names are prefixed `app_store_connect_` (omitted above for brevity).
 
+A Claude Code skill that drives these tools through a full release ships alongside the server —
+see [Release-prep plugin](#release-prep-plugin).
+
 ## Listing round-trip
 
 `export_listing` returns the complete listing — name, subtitle, description, keywords,
@@ -161,7 +212,7 @@ fastlane/metadata/
 ```
 
 This is the layout `fastlane deliver` already uses, so the tree interops with it. One
-file per field means the file content *is* the value, byte for byte — a description
+file per field means the file content _is_ the value, byte for byte — a description
 containing `## Keywords`, a `---` rule or a fenced code block is just text, and `git
 diff` shows you the field that changed rather than a line number in a wall of copy.
 
@@ -193,6 +244,39 @@ apply_listing  { files: [...], dryRun: false, confirm: true }
 - `format: "review"` renders a read-only markdown summary with character counts, for when
   you just want to read the listing. Nothing parses it back.
 - If `fastlane/metadata/` already exists, diff before overwriting it.
+
+## Release-prep plugin
+
+This repo doubles as a [Claude Code](https://claude.com/claude-code) plugin marketplace. The
+`appstore-toolkit` plugin bundles the **`appstore-release-prep`** skill, which drives the
+round-trip above: it audits what shipped since the last release, writes the CHANGELOG entry
+and every store field within Apple's limits, and pushes the result back through
+`apply_listing`.
+
+```text
+/plugin marketplace add mgcrea/mcp-appstore-connect
+/plugin install appstore-toolkit@mgcrea-appstore
+```
+
+Installing it also wires up the `appstore-connect` MCP server, so the skill and the tools it
+calls arrive together. The server config reads these from your shell environment — nothing is
+stored in the plugin:
+
+| Variable                          | Required                         |
+| --------------------------------- | -------------------------------- |
+| `APP_STORE_CONNECT_KEY_ID`        | yes                              |
+| `APP_STORE_CONNECT_ISSUER_ID`     | yes                              |
+| `APP_STORE_CONNECT_P8_PATH`       | yes                              |
+| `APP_STORE_CONNECT_VENDOR_NUMBER` | only for `download_sales_report` |
+| `APP_STORE_CONNECT_ALLOW_WRITES`  | set to `1` to expose write tools |
+
+`apply_listing` is a write tool, so it stays hidden until `APP_STORE_CONNECT_ALLOW_WRITES=1`.
+That is deliberate: installing a plugin should not silently grant it permission to overwrite a
+live App Store listing.
+
+The skill also ships an offline auditor (`scripts/audit_release.py`, stdlib Python, no network
+calls) that measures every field against its limit and exits non-zero when one is over or
+missing, so it can gate a release from CI.
 
 ## Notes
 
