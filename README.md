@@ -57,7 +57,7 @@ Both trace back to the exact commit and CI run that produced them. The commands 
 Three independent limits, smallest first:
 
 1. **Writes are off by default.** Mutating tools aren't merely refused when `APP_STORE_CONNECT_ALLOW_WRITES=1` is unset — they are never registered, so they don't appear in the tool list and a confused agent cannot call them. The default install is read-only.
-2. **Destructive tools need `confirm: true`.** Deleting a screenshot or removing a tester takes an explicit acknowledgement argument, so it can't happen as a side effect of some broader request.
+2. **Destructive tools need `confirm: true`.** Deleting a screenshot, removing a tester, or submitting a version to Apple takes an explicit acknowledgement argument, so it can't happen as a side effect of some broader request. Submitting is the one that leaves your account — it is gated the same way, and refuses outright unless the version is in a submittable state with a build attached.
 3. **Your API key's role is the real ceiling**, and this server can't raise it. A read-only role is enough for every list/get tool; issue one of those and no bug here can write anything. Scope the key to the narrowest role that does your job.
 
 Applying a listing has its own rails — digest-based conflict detection, an `allowClear` gate before any field is emptied, and a whole-apply abort if any field is over Apple's limit. See [Listing round-trip](#listing-round-trip).
@@ -200,6 +200,8 @@ npx @modelcontextprotocol/inspector npx -y @mgcrea/mcp-appstore-connect
 **Listing round-trip** — `export_listing`, _`apply_listing`_\* — pull the whole listing into a git-committable metadata tree, edit it locally, push it back. See [Listing round-trip](#listing-round-trip).
 
 **Versions & metadata** — `list_versions`, `list_version_localizations`, `get_version_localization`, _`create_version`_\*, _`update_version_localization`_\* (description, keywords, what's-new, promo text)
+
+**Review submissions** — `list_review_submissions`, _`submit_version_for_review`_\*†, _`cancel_review_submission`_\*† — hand a finished version to Apple for review, or withdraw it
 
 **App info** — `list_app_infos`, `list_app_info_localizations`, `get_app_info_localization`, _`update_app_info_localization`_\* (name, subtitle, privacy policy — the fields that outlive a version)
 

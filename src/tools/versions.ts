@@ -188,7 +188,8 @@ export const registerVersionTools = (
       description:
         "Create a new App Store version for an app (e.g. start metadata for 1.3.0). The version " +
         "begins in PREPARE_FOR_SUBMISSION; attach a build with " +
-        "app_store_connect_set_version_build, then submit it separately.",
+        "app_store_connect_set_version_build, then hand it to Apple with " +
+        "app_store_connect_submit_version_for_review.",
       inputSchema: {
         appId: appIdArg,
         versionString: z.string().min(1).describe('The new version number, e.g. "1.3.0".'),

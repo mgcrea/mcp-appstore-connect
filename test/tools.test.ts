@@ -50,6 +50,15 @@ const patchCall = (fetchImpl: ReturnType<typeof vi.fn>): [string, RequestInit] |
     | [string, RequestInit]
     | undefined;
 
+const postCall = (
+  fetchImpl: ReturnType<typeof vi.fn>,
+  path: string,
+): [string, RequestInit] | undefined =>
+  fetchImpl.mock.calls.find(
+    (call) =>
+      String(call[0]).includes(path) && (call[1] as RequestInit | undefined)?.method === "POST",
+  ) as [string, RequestInit] | undefined;
+
 describe("tool registration", () => {
   let readOnly: string[];
   let withWrites: string[];
@@ -64,6 +73,7 @@ describe("tool registration", () => {
       "app_store_connect_list_apps",
       "app_store_connect_get_app",
       "app_store_connect_list_versions",
+      "app_store_connect_list_review_submissions",
       "app_store_connect_list_app_infos",
       "app_store_connect_list_app_info_localizations",
       "app_store_connect_get_app_info_localization",
@@ -94,6 +104,8 @@ describe("tool registration", () => {
       "app_store_connect_create_version",
       "app_store_connect_update_version_localization",
       "app_store_connect_set_version_build",
+      "app_store_connect_submit_version_for_review",
+      "app_store_connect_cancel_review_submission",
       "app_store_connect_update_app_info_localization",
       "app_store_connect_apply_listing",
       "app_store_connect_upload_screenshot",
@@ -338,6 +350,181 @@ describe("set_version_build", () => {
 
     expect(result.isError).toBe(true);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("submit_version_for_review", () => {
+  const VERSION_ID = "01f7fc5e-fef8-49ec-b749-7849cdde3e51";
+  const APP_ID = "6753819990";
+  const SUBMISSION_ID = "sub-1";
+
+  const versionBody = (
+    attrs: Record<string, unknown> = {},
+    relationships: Record<string, unknown> = {},
+  ): unknown => ({
+    data: {
+      id: VERSION_ID,
+      type: "appStoreVersions",
+      attributes: {
+        platform: "MAC_OS",
+        versionString: "1.8.0",
+        appStoreState: "PREPARE_FOR_SUBMISSION",
+        ...attrs,
+      },
+      relationships: {
+        app: { data: { id: APP_ID, type: "apps" } },
+        build: { data: { id: "build-1", type: "builds" } },
+        ...relationships,
+      },
+    },
+  });
+
+  const submission = (state: string): unknown => ({
+    id: SUBMISSION_ID,
+    type: "reviewSubmissions",
+    attributes: { platform: "MAC_OS", state },
+  });
+
+  type Routes = {
+    version?: unknown;
+    /** Submissions already with Apple, keyed off the in-flight filter. */
+    inFlight?: unknown[];
+    /** Not-yet-submitted drafts to reuse. */
+    drafts?: unknown[];
+    items?: unknown[];
+  };
+
+  /** Route by URL, method and `filter[state]` — the two list GETs share a path. */
+  const routed = (routes: Routes = {}): ReturnType<typeof vi.fn> =>
+    vi.fn(async (url: string, init?: RequestInit) => {
+      const parsed = new URL(url);
+      const method = init?.method ?? "GET";
+      const state = parsed.searchParams.get("filter[state]") ?? "";
+
+      if (parsed.pathname.includes("/reviewSubmissions") && parsed.pathname.includes("/items")) {
+        return jsonResponse({ data: routes.items ?? [] });
+      }
+      if (parsed.pathname.endsWith("/reviewSubmissions") && method === "GET") {
+        const drafts = state === "READY_FOR_REVIEW";
+        return jsonResponse({ data: (drafts ? routes.drafts : routes.inFlight) ?? [] });
+      }
+      if (parsed.pathname.endsWith("/reviewSubmissions") && method === "POST") {
+        return jsonResponse({ data: submission("READY_FOR_REVIEW") });
+      }
+      if (parsed.pathname.includes("/appStoreVersions/")) {
+        return jsonResponse(routes.version ?? versionBody());
+      }
+      return jsonResponse({ data: submission("WAITING_FOR_REVIEW") });
+    });
+
+  const callTool = async (
+    args: Record<string, unknown>,
+    fetchImpl: ReturnType<typeof vi.fn>,
+  ): ReturnType<Client["callTool"]> => {
+    const client = await connect(
+      { ...baseConfig, allowWrites: true },
+      fetchImpl as unknown as typeof fetch,
+    );
+    return client.callTool({
+      name: "app_store_connect_submit_version_for_review",
+      arguments: args,
+    });
+  };
+
+  it("creates a submission, adds the version and submits it", async () => {
+    const fetchImpl = routed();
+
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBeFalsy();
+
+    const created = postCall(fetchImpl, "/v1/reviewSubmissions") as [string, RequestInit];
+    expect(JSON.parse(String(created[1].body))).toEqual({
+      data: {
+        type: "reviewSubmissions",
+        attributes: { platform: "MAC_OS" },
+        relationships: { app: { data: { type: "apps", id: APP_ID } } },
+      },
+    });
+
+    const item = postCall(fetchImpl, "/v1/reviewSubmissionItems") as [string, RequestInit];
+    expect(JSON.parse(String(item[1].body)).data.relationships).toEqual({
+      reviewSubmission: { data: { type: "reviewSubmissions", id: SUBMISSION_ID } },
+      appStoreVersion: { data: { type: "appStoreVersions", id: VERSION_ID } },
+    });
+
+    const patch = patchCall(fetchImpl);
+    expect(patch?.[0]).toBe(
+      `https://api.appstoreconnect.apple.com/v1/reviewSubmissions/${SUBMISSION_ID}`,
+    );
+    expect(JSON.parse(String(patch?.[1].body)).data.attributes).toEqual({ submitted: true });
+  });
+
+  it("reuses an existing draft rather than creating a second one", async () => {
+    const fetchImpl = routed({ drafts: [submission("READY_FOR_REVIEW")] });
+
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBeFalsy();
+    expect(postCall(fetchImpl, "/v1/reviewSubmissions")).toBeUndefined();
+    expect(postCall(fetchImpl, "/v1/reviewSubmissionItems")).toBeDefined();
+  });
+
+  it("skips the item when the draft already holds this version", async () => {
+    const fetchImpl = routed({
+      drafts: [submission("READY_FOR_REVIEW")],
+      items: [
+        {
+          id: "item-1",
+          type: "reviewSubmissionItems",
+          relationships: {
+            appStoreVersion: { data: { id: VERSION_ID, type: "appStoreVersions" } },
+          },
+        },
+      ],
+    });
+
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBeFalsy();
+    expect(postCall(fetchImpl, "/v1/reviewSubmissionItems")).toBeUndefined();
+    expect(patchCall(fetchImpl)).toBeDefined();
+  });
+
+  it("refuses without an explicit confirm", async () => {
+    const fetchImpl = routed();
+
+    const result = await callTool({ versionId: VERSION_ID }, fetchImpl);
+
+    expect(result.isError).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "a version with no build attached",
+      { version: versionBody({}, { build: { data: null } }) },
+      "no build is attached",
+    ],
+    [
+      "a version already past submission",
+      { version: versionBody({ appStoreState: "READY_FOR_SALE" }) },
+      "READY_FOR_SALE",
+    ],
+    [
+      "an app whose submission is already with Apple",
+      { inFlight: [submission("IN_REVIEW")] },
+      "IN_REVIEW",
+    ],
+  ])("refuses %s without submitting", async (_label, routes, expected) => {
+    const fetchImpl = routed(routes);
+
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0]?.text ?? "").toContain(expected);
+    expect(patchCall(fetchImpl)).toBeUndefined();
+    expect(postCall(fetchImpl, "/v1/reviewSubmissionItems")).toBeUndefined();
   });
 });
 

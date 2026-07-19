@@ -9,6 +9,7 @@ import { registerDeviceTools } from "./devices.js";
 import { registerListingTools } from "./listing.js";
 import { registerReportTools } from "./reports.js";
 import { registerScreenshotTools } from "./screenshots.js";
+import { registerSubmissionTools } from "./submissions.js";
 import { registerTestflightTools } from "./testflight.js";
 import { registerUserTools } from "./users.js";
 import { registerVersionTools } from "./versions.js";
@@ -39,6 +40,7 @@ export const registerTools = (
   const { allowWrites } = ctx;
   registerAppTools(server, client, allowWrites);
   registerVersionTools(server, client, allowWrites);
+  registerSubmissionTools(server, client, allowWrites);
   registerAppInfoTools(server, client, allowWrites);
   registerListingTools(server, client, ctx);
   registerScreenshotTools(server, client, allowWrites);
