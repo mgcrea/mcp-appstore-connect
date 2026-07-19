@@ -11,6 +11,19 @@ Every limit below counts **characters, including spaces**. Measure, never eyebal
 | Promotional text | 170   | **Yes**                       | No                  |
 | Description      | 4000  | No                            | No                  |
 | What's New       | 4000  | No (tied to the version)      | No                  |
+| Marketing URL    | 255   | **Yes**                       | No                  |
+| Support URL      | 255   | **Yes**                       | No                  |
+| Privacy URL      | 255   | No                            | No                  |
+
+A character is a **UTF-16 code unit**, not a code point: an emoji costs 2, a CJK
+character costs 1, and a flag emoji can cost 4. This is why a description that
+"looks like" 3,999 gets rejected at 4,002. Every limit is also **per locale**, and
+`apply_listing` refuses the whole push if any one locale is over.
+
+Two of these are scoped differently from the rest, which matters when you push:
+**name, subtitle and privacy URL belong to the app**, not to a version, so editing
+them changes the live listing immediately rather than riding along with the next
+submission. The other six are version-scoped.
 
 "Editable without a new build" is the lever most people miss. Promotional text is
 the only field you can change any time — so anything time-sensitive (a launch, a

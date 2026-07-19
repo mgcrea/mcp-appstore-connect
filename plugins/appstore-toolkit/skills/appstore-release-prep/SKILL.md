@@ -49,9 +49,27 @@ app_store_connect_export_listing { appId }        # version defaults to "latest"
 ```
 
 It returns `{path, content}` pairs; write them as-is. The result is a
-`fastlane/metadata/<locale>/` tree — one plain-text file per field — plus
-`fastlane/metadata/.listing.json`, which carries the App Store Connect ids and a digest
-of every field as it was at export. Commit all of it, including the sidecar.
+`fastlane/metadata/<locale>/` tree — one plain-text file per field, for **every** locale —
+plus `fastlane/metadata/.listing.json`, which carries the App Store Connect ids and a
+digest of every field as it was at export. Commit all of it, including the sidecar.
+
+**Check which version you just exported.** `latest` does not mean "the one being
+prepared" — it means the highest-precedence version that exists, and when no editable
+version exists yet it falls back to the one that is **already on sale**. The audit reads
+`version.appStoreState` out of the sidecar and says so:
+
+```
+! this export is pointed at a READY_FOR_SALE version -- the SHIPPED one.
+```
+
+That is the state you are in whenever the new version has not been created in App Store
+Connect yet, which is the normal state when you are about to submit. Writing release notes
+into that tree and applying them edits the release that already shipped. Create the version
+first (`app_store_connect_create_version`), then re-export, and the tree points at the
+right one. Two things make this worth checking rather than assuming: nothing in
+`apply_listing` inspects version state, so the dry run reports the write as a normal
+change; and `name`, `subtitle` and `privacy_url` are appInfo-scoped rather than
+version-scoped, so they are never protected by version state at all.
 
 Then `audit_release.py` reads that tree directly, so "what is live" and "what the audit
 measures" are the same bytes. Working this way removes the whole class of drift the
@@ -87,7 +105,11 @@ app_store_connect_apply_listing { files: [...], dryRun: false, confirm: true }
 `APP_STORE_CONNECT_ALLOW_WRITES=1`. If you cannot see it, that is the reason — say so and let
 the user opt in, rather than reporting the push as failed.
 
-Pass only the files you changed, plus `.listing.json`. Read the dry run before applying.
+Pass only the files you changed, plus `.listing.json`. You do not have to remember which
+those were: the audit compares each file against the digest recorded at export and prints
+the list under `* edited since export, pass these to apply_listing`.
+
+Read the dry run before applying.
 Fields reported as **conflict** were edited in App Store Connect since your export — do
 not `force` past them without asking the user; re-export and merge instead. Fields
 reported as **blocked** are empty files that would clear live copy; confirm that is
@@ -123,10 +145,17 @@ means **removing** something. Take the current count from the audit, subtract fr
 the limit, and know what you are shopping with. Writing first and measuring after is
 how you end up 1,300 over and hacking good sentences apart to claw it back.
 
-Limits, all counting spaces: subtitle 30, promo text 170, keywords 100, description
-4,000, What's New 4,000. `references/appstore-fields.md` has the per-field rules —
-read it before writing keywords or subtitle, which have non-obvious traps (no space
-after keyword commas; plurals are stemmed; don't repeat the app name).
+Limits, all counting spaces: name 30, subtitle 30, promo text 170, keywords 100,
+description 4,000, What's New 4,000, and 255 for each of the three URLs.
+`references/appstore-fields.md` has the per-field rules — read it before writing keywords
+or subtitle, which have non-obvious traps (no space after keyword commas; plurals are
+stemmed; don't repeat the app name).
+
+Two things about the counting. Apple counts **UTF-16 code units**, so an emoji costs 2 and
+a CJK character costs 1 — never eyeball a field that has emoji in it. And the budget is
+per **locale**: the audit measures every locale in the tree because `apply_listing` refuses
+the entire push if any single one is over, so a French description nobody looked at will
+block the English one you did.
 
 When the description is over budget, tighten the _whole_ listing rather than
 mutilating only the new paragraph — merging two thin bullets or cutting a hedge
@@ -147,15 +176,25 @@ the reason a check exists is more useful than the fact that it exists.
 
 ## 4. Fill every App Store field
 
-Write all of them, not just the ones that are currently empty.
+Write all of them, not just the ones that are currently empty — but "all" means the fields
+the release actually needs. `promotional_text.txt` and the URL files are genuinely
+optional, and a **first** version must not carry release notes at all (Apple rejects a
+What's New on 1.0). The audit distinguishes these: `MISSING` gates the release, `unset` is
+just telling you the field is empty.
 
 In a metadata tree, each field is its own file under `fastlane/metadata/<locale>/`:
 `release_notes.txt` (What's New), `promotional_text.txt`, `description.txt`,
-`keywords.txt`, `subtitle.txt`, plus `name.txt` and the URL files. Write the exact copy
+`keywords.txt`, `subtitle.txt`, `name.txt`, and `marketing_url.txt` /
+`support_url.txt` / `privacy_url.txt`. Write the exact copy
 and nothing else — no headings, no character-count annotations, no surrounding prose.
 The file content is pushed verbatim, so anything extra ships to customers. To leave a
 field alone, delete its file; an empty file means "clear this field", and apply refuses
 it unless you pass `allowClear: true`.
+
+If the tree has more than one locale, the release notes you just wrote apply to all of
+them, and the other locales are still carrying the *previous* version's copy. You cannot
+translate them yourself to a standard worth shipping — say which locales are now stale and
+let the user decide, rather than leaving it silent or machine-translating it.
 
 In a single markdown doc, order the sections as App Store Connect does — What's New,
 promotional text, description, keywords, subtitle — so it can be pasted top to bottom.
@@ -193,9 +232,9 @@ wrong in most storefronts.
 
 ## 6. Verify, then stop
 
-Re-run the audit. Every field must be inside its limit, none missing, no prose em
-dashes. Report the final counts, because "3,905 / 4,000" tells the user something
-useful that "done" does not: there is no room left for the next feature.
+Re-run the audit. Every field in every locale must be inside its limit, nothing `MISSING`,
+no prose em dashes. Report the final counts, because "3,905 / 4,000" tells the user
+something useful that "done" does not: there is no room left for the next feature.
 
 Say where things stand against the live listing. "Local and live now agree" and "local
 is ahead, pending a push" are different states, and the user is the one who decides
@@ -205,7 +244,10 @@ when to push. If you exported a metadata tree, remind them the tree and
 If the project generates its screenshots from a config, that config — not the doc —
 is the source of truth for the taglines baked into the images. Changing a tagline
 there means the PNGs are now stale; **say so**, since regenerating them is a separate
-step the user has to run.
+step the user has to run. The `xcode-screenshot-pipeline` skill covers actually
+regenerating them, and `app_store_connect_list_screenshot_sets` will tell you whether the
+version has a complete set — an incomplete one blocks submission, and nothing in this
+audit can see it.
 
 Do not bump versions, commit, tag, or submit. This skill writes documents; shipping
 is the user's call.
