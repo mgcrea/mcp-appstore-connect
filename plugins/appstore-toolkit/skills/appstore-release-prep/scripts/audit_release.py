@@ -252,7 +252,13 @@ STORE_DOC_CANDIDATES = (
 )
 
 
-DEFAULT_METADATA_ROOT = "fastlane/metadata"
+# Conventional roots, tried in order, and ONLY when no sidecar was found -- a tree
+# with a .listing.json is located by that, whatever its directory is called. So
+# this list matters for hand-authored trees, which is exactly the case that must
+# not fall through to the markdown-doc parser and report a full listing missing.
+# fastlane/metadata stays first so a repo that really uses fastlane is unaffected.
+DEFAULT_METADATA_ROOTS = ("fastlane/metadata", "Listing")
+DEFAULT_METADATA_ROOT = DEFAULT_METADATA_ROOTS[0]  # the example used in messages
 SIDECAR_BASENAME = ".listing.json"
 
 # Mirrors LOCALE_PATTERN in src/listing/manifest.ts. Only needed because the
@@ -333,10 +339,20 @@ def find_metadata_root(repo, override=None):
     if len(sidecars) == 1:
         return sidecars[0]
 
-    # No sidecar: a hand-authored tree at the conventional path still counts. A
-    # tree that was moved and has no sidecar needs the flag.
-    if os.path.isdir(os.path.join(repo, DEFAULT_METADATA_ROOT)):
-        return DEFAULT_METADATA_ROOT
+    # No sidecar: a hand-authored tree at a conventional path still counts. A
+    # tree somewhere else with no sidecar needs the flag.
+    present = [r for r in DEFAULT_METADATA_ROOTS
+               if os.path.isdir(os.path.join(repo, r))]
+    if len(present) > 1:
+        # Never guess between them. A repo caught mid-migration has both, and
+        # picking the first would audit the stale tree while the other is the one
+        # being edited -- silently reporting "in sync" about the wrong files.
+        raise SystemExit(
+            f"Found more than one conventional metadata root ({', '.join(present)}) "
+            f"and no {SIDECAR_BASENAME} to disambiguate. Pass --metadata-root to say "
+            f"which tree to audit, or delete the one you no longer use.")
+    if present:
+        return present[0]
     return None
 
 
@@ -1004,8 +1020,9 @@ def main():
                          "any single locale is over limit.")
     ap.add_argument("--metadata-root", default=None,
                     help="Repo-relative path to the metadata tree. Auto-detected from a "
-                         ".listing.json, else fastlane/metadata; a tree that was moved and has no "
-                         "sidecar needs this flag. If the path given does not exist the audit "
+                         ".listing.json, else fastlane/metadata or Listing; a tree elsewhere with "
+                         "no sidecar needs this flag, as does a repo holding both conventional "
+                         "roots. If the path given does not exist the audit "
                          "fails rather than falling back to the markdown-doc parser.")
     ap.add_argument("--live-fields", default=None,
                     help="JSON file of the LIVE App Store Connect fields, to diff against the "

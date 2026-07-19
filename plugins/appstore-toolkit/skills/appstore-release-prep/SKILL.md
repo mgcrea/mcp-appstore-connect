@@ -1,6 +1,6 @@
 ---
 name: appstore-release-prep
-description: Write the release documentation for an Xcode app about to be submitted to the App Store — the CHANGELOG entry for the new version, and every App Store Connect metadata field (What's New, promotional text, description, keywords, subtitle) in a fastlane/metadata/ tree, APPSTORE.md, or equivalent. Use this whenever the user is preparing, cutting, or submitting a release; asks to update the CHANGELOG or the App Store copy "with the latest features"; asks what's new since the last release or what still needs documenting; asks for release notes, store description, keywords, subtitle, or promo text; or says a field is over Apple's character limit. Reach for it even when they only mention one of the two files, or phrase it as "get this ready to ship" without naming a file — the two are two renderings of one release and drift apart when written separately. Also use it to audit a listing before submission, or when store copy reads as AI-written and needs the em dashes taken out.
+description: Write the release documentation for an Xcode app about to be submitted to the App Store — the CHANGELOG entry for the new version, and every App Store Connect metadata field (What's New, promotional text, description, keywords, subtitle) in a Listing/ or fastlane/metadata/ tree, APPSTORE.md, or equivalent. Use this whenever the user is preparing, cutting, or submitting a release; asks to update the CHANGELOG or the App Store copy "with the latest features"; asks what's new since the last release or what still needs documenting; asks for release notes, store description, keywords, subtitle, or promo text; or says a field is over Apple's character limit. Reach for it even when they only mention one of the two files, or phrase it as "get this ready to ship" without naming a file — the two are two renderings of one release and drift apart when written separately. Also use it to audit a listing before submission, or when store copy reads as AI-written and needs the em dashes taken out.
 ---
 
 # App Store release prep
@@ -28,8 +28,8 @@ so it can gate a release.
 
 The source is auto-detected: a metadata tree wins, else `APPSTORE.md`, `STORES.md`
 and friends. The tree is found from its `.listing.json` wherever that sits, falling
-back to `fastlane/metadata/`; pass `--metadata-root <path>` for a tree that was moved
-and has no sidecar, or when the repo holds more than one. Pass `--fields-file <path>`
+back to `fastlane/metadata/` or `Listing/`; pass `--metadata-root <path>` for a tree
+that was moved and has no sidecar, or when the repo holds more than one. Pass `--fields-file <path>`
 to force a document, or `--locale` to audit a locale other than the primary one.
 **Check the source it reports** — the header says which file or directory the numbers
 came from.
@@ -55,8 +55,9 @@ It returns `{path, content}` pairs; write them as-is, at the paths it gives you.
 result is a `<root>/<locale>/` tree — one plain-text file per field, for **every** locale —
 plus `<root>/.listing.json`, which carries the App Store Connect ids and a digest of every
 field as it was at export. Commit all of it, including the sidecar. The root is
-`fastlane/metadata/` unless this server or repo is configured otherwise, so read the paths
-rather than assuming them; `apply_listing` later locates the tree from wherever the sidecar
+`fastlane/metadata/` unless this server or repo is configured otherwise (`Listing/` is the
+other convention the audit knows), so read the paths returned to you rather than assuming
+them; `apply_listing` later locates the tree from wherever the sidecar
 sits, so never move the sidecar out of its tree.
 
 **Check which version you just exported.** `latest` does not mean "the one being
@@ -189,7 +190,7 @@ What's New on 1.0). The audit distinguishes these: `MISSING` gates the release, 
 just telling you the field is empty.
 
 In a metadata tree, each field is its own file under `<root>/<locale>/` (the audit
-header tells you the root; `fastlane/metadata/` by default):
+header tells you the root; `fastlane/metadata/` or `Listing/` by default):
 `release_notes.txt` (What's New), `promotional_text.txt`, `description.txt`,
 `keywords.txt`, `subtitle.txt`, `name.txt`, and `marketing_url.txt` /
 `support_url.txt` / `privacy_url.txt`. Write the exact copy
