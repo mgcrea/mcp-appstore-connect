@@ -307,6 +307,60 @@ export class AppStoreConnectClient {
     return this.request<T>("GET", path, { query });
   }
 
+  /**
+   * Turn an absolute `links.next` back into a path this client can request.
+   * Returns undefined when the link points somewhere else entirely, so a
+   * surprising cursor ends pagination rather than sending our JWT off-host.
+   */
+  private relativize(next: string): string | undefined {
+    try {
+      const url = new URL(next);
+      const base = new URL(this.baseUrl);
+      if (url.origin !== base.origin) return undefined;
+      return `${url.pathname}${url.search}`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * GET a collection, following `links.next` until it runs out.
+   *
+   * Apple caps `limit` at 200, so any app with more locales (or screenshots)
+   * than that silently truncates without this. The next links are absolute and
+   * already carry the cursor *and* every original param, so `query` is applied
+   * to the first page only — re-applying it would clobber the cursor.
+   */
+  async getAll<T = unknown>(
+    path: string,
+    query?: Query,
+    maxPages = 20,
+  ): Promise<{ data: T[]; pages: number }> {
+    type Envelope = { data?: T[]; links?: { next?: unknown } };
+    const collected: T[] = [];
+    let nextPath: string | undefined = path;
+    let nextQuery = query;
+    let pages = 0;
+
+    while (nextPath !== undefined) {
+      if (pages >= maxPages) {
+        throw new Error(
+          `Pagination exceeded ${maxPages} pages for ${path} (${collected.length} items so far). ` +
+            `Raise maxPages if this collection is genuinely that large.`,
+        );
+      }
+      const res: Envelope = await this.request<Envelope>("GET", nextPath, { query: nextQuery });
+      pages += 1;
+      if (Array.isArray(res?.data)) collected.push(...res.data);
+
+      const next = res?.links?.next;
+      nextPath = typeof next === "string" ? this.relativize(next) : undefined;
+      nextQuery = undefined;
+    }
+
+    return { data: collected, pages };
+  }
+
   post<T = unknown>(path: string, body?: unknown, query?: Query): Promise<T> {
     return this.request<T>("POST", path, { body, query });
   }
