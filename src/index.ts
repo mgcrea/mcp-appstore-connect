@@ -6,7 +6,13 @@ export {
   type CreatedServer,
   type CreateServerOptions,
 } from "./server.js";
-export { loadConfig, resolvePrivateKey, type Config } from "./config.js";
+export {
+  loadConfig,
+  resolveConfigPath,
+  resolvePrivateKey,
+  type Config,
+  type FileConfig,
+} from "./config.js";
 export {
   AppStoreConnectClient,
   type AscClientOptions,
