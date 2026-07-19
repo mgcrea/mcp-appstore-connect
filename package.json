@@ -13,6 +13,10 @@
   ],
   "license": "MIT",
   "author": "Olivier Louvignes <olivier@mgcrea.io>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mgcrea/mcp-appstore-connect.git"
+  },
   "bin": {
     "appstore-connect-mcp": "dist/cli.js"
   },
