@@ -70,8 +70,7 @@ const dirnameOf = (path: string): string => {
 };
 
 /** How to name the root in an error, since "" has no path to quote. */
-const describeRoot = (root: string): string =>
-  root === "" ? "the repo root" : `"${root}/"`;
+const describeRoot = (root: string): string => (root === "" ? "the repo root" : `"${root}/"`);
 
 export type ParsedManifest = {
   sidecar: Sidecar;

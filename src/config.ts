@@ -41,7 +41,9 @@ const ConfigSchema = z
     allowWrites: z.boolean().default(false),
     maxRetries: z.number().int().nonnegative().max(10).default(3),
     tokenTtlSeconds: z.number().int().min(60).max(1200).default(1140),
-    metadataRoot: metadataRootSchema.default(DEFAULT_METADATA_ROOT).transform(normalizeMetadataRoot),
+    metadataRoot: metadataRootSchema
+      .default(DEFAULT_METADATA_ROOT)
+      .transform(normalizeMetadataRoot),
   })
   .strict();
 

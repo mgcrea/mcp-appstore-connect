@@ -199,7 +199,7 @@ field alone, delete its file; an empty file means "clear this field", and apply 
 it unless you pass `allowClear: true`.
 
 If the tree has more than one locale, the release notes you just wrote apply to all of
-them, and the other locales are still carrying the *previous* version's copy. You cannot
+them, and the other locales are still carrying the _previous_ version's copy. You cannot
 translate them yourself to a standard worth shipping — say which locales are now stale and
 let the user decide, rather than leaving it silent or machine-translating it.
 
