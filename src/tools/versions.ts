@@ -26,8 +26,72 @@ const localizationIdArg = z
     "The appStoreVersionLocalization id (from app_store_connect_list_version_localizations).",
   );
 
-/** Apple only accepts a build change while the version is still editable. */
+/** Apple only accepts a build or attribute change while the version is still editable. */
 const EDITABLE_STATES = ["PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED"];
+
+/** How an approved version reaches customers. */
+const RELEASE_TYPES = ["MANUAL", "AFTER_APPROVAL", "SCHEDULED"] as const;
+
+const RELEASE_TYPE_DESCRIPTION =
+  "How the version reaches customers once Apple approves it: MANUAL (it waits in " +
+  "PENDING_DEVELOPER_RELEASE until you release it by hand), AFTER_APPROVAL (released " +
+  "automatically on approval), or SCHEDULED (released at earliestReleaseDate).";
+
+const releaseTypeArg = z.enum(RELEASE_TYPES).describe(RELEASE_TYPE_DESCRIPTION);
+
+const earliestReleaseDateArg = z
+  .string()
+  .describe(
+    'ISO-8601 date-time for a SCHEDULED release, e.g. "2026-08-01T12:00:00-07:00". Required ' +
+      "when releaseType is SCHEDULED, and rejected with any other releaseType.",
+  );
+
+/**
+ * `earliestReleaseDate` only means something for a SCHEDULED release, and Apple
+ * rejects the pairing rather than ignoring it. A flat input schema can't express
+ * the dependency, so both tools that accept these fields check it here.
+ */
+const assertReleaseFieldsAgree = (
+  releaseType: (typeof RELEASE_TYPES)[number] | undefined,
+  earliestReleaseDate: string | undefined,
+): void => {
+  if (releaseType === "SCHEDULED" && earliestReleaseDate === undefined) {
+    throw new Error("releaseType SCHEDULED requires earliestReleaseDate.");
+  }
+  if (
+    releaseType !== undefined &&
+    releaseType !== "SCHEDULED" &&
+    earliestReleaseDate !== undefined
+  ) {
+    throw new Error(`earliestReleaseDate only applies to a SCHEDULED release, not ${releaseType}.`);
+  }
+};
+
+/**
+ * The state gate shared by every write to a version. Apple answers a change to a
+ * locked version with a bare 409, so we read the state first and say which one
+ * blocked it.
+ */
+const editableStateProblem = (appStoreState: unknown, change: string): string | undefined => {
+  if (typeof appStoreState !== "string" || EDITABLE_STATES.includes(appStoreState)) {
+    return undefined;
+  }
+  return (
+    `the version is ${appStoreState}; ${change} can only be changed while it is ` +
+    `${EDITABLE_STATES.join(" or ")}`
+  );
+};
+
+/** Guard an attribute update the same way `assertAttachable` guards a build change. */
+const assertEditable = (versionResponse: unknown): void => {
+  const attrs = attributesOf(resourceOf(versionResponse));
+  const problem = editableStateProblem(attrs.appStoreState, "its metadata");
+  if (problem === undefined) return;
+  throw new PreconditionError(`Cannot update this version: ${problem}.`, {
+    appStoreState: attrs.appStoreState,
+    versionString: attrs.versionString,
+  });
+};
 
 /**
  * Apple answers a bad build attach with a bare 409 that names no cause, so we
@@ -49,11 +113,9 @@ const assertAttachable = (versionResponse: unknown, buildResponse: unknown): voi
 
   const problems: string[] = [];
 
-  if (typeof appStoreState === "string" && !EDITABLE_STATES.includes(appStoreState)) {
-    problems.push(
-      `the version is ${appStoreState}; a build can only be changed while it is ` +
-        `${EDITABLE_STATES.join(" or ")}`,
-    );
+  const stateProblem = editableStateProblem(appStoreState, "a build");
+  if (stateProblem !== undefined) {
+    problems.push(stateProblem);
   }
 
   const versionAppId = relatedId(version, "app");
@@ -194,21 +256,67 @@ export const registerVersionTools = (
         appId: appIdArg,
         versionString: z.string().min(1).describe('The new version number, e.g. "1.3.0".'),
         platform: z.enum(PLATFORMS).default("IOS").describe("Platform for the version."),
+        releaseType: releaseTypeArg
+          .optional()
+          .describe(`${RELEASE_TYPE_DESCRIPTION} Defaults to Apple's AFTER_APPROVAL.`),
+        earliestReleaseDate: earliestReleaseDateArg.optional(),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    async ({ appId, versionString, platform }) =>
-      wrap(async () =>
-        summarizeResponse(
+    async ({ appId, versionString, platform, releaseType, earliestReleaseDate }) =>
+      wrap(async () => {
+        assertReleaseFieldsAgree(releaseType, earliestReleaseDate);
+
+        return summarizeResponse(
           await client.post("/v1/appStoreVersions", {
             data: {
               type: "appStoreVersions",
-              attributes: { platform, versionString },
+              attributes: compact({ platform, versionString, releaseType, earliestReleaseDate }),
               relationships: { app: { data: { type: "apps", id: appId } } },
             },
           }),
-        ),
-      ),
+        );
+      }),
+  );
+
+  server.registerTool(
+    "app_store_connect_update_version",
+    {
+      description:
+        "Update an App Store version's own attributes — most usefully releaseType, which decides " +
+        "whether an approved version goes live automatically (AFTER_APPROVAL), waits for you to " +
+        "release it (MANUAL), or ships at a set time (SCHEDULED). Also renames the version or " +
+        "sets its copyright. Only the fields you pass are changed. The version must still be " +
+        "PREPARE_FOR_SUBMISSION or DEVELOPER_REJECTED. To change a version's build instead, use " +
+        "app_store_connect_set_version_build.",
+      inputSchema: {
+        versionId: versionIdArg,
+        releaseType: releaseTypeArg.optional(),
+        earliestReleaseDate: earliestReleaseDateArg.optional(),
+        versionString: z.string().min(1).optional().describe('Rename the version, e.g. "1.3.0".'),
+        copyright: z.string().optional().describe('Copyright line, e.g. "2026 Acme Inc.".'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ versionId, ...attrs }) =>
+      wrap(async () => {
+        const attributes = compact(attrs);
+        if (Object.keys(attributes).length === 0) {
+          throw new Error(
+            "Pass at least one field to update: releaseType, earliestReleaseDate, " +
+              "versionString or copyright.",
+          );
+        }
+        assertReleaseFieldsAgree(attrs.releaseType, attrs.earliestReleaseDate);
+
+        assertEditable(await client.get(`/v1/appStoreVersions/${versionId}`));
+
+        return summarizeResponse(
+          await client.patch(`/v1/appStoreVersions/${versionId}`, {
+            data: { id: versionId, type: "appStoreVersions", attributes },
+          }),
+        );
+      }),
   );
 
   server.registerTool(

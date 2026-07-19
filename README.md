@@ -199,7 +199,7 @@ npx @modelcontextprotocol/inspector npx -y @mgcrea/mcp-appstore-connect
 
 **Listing round-trip** — `export_listing`, _`apply_listing`_\* — pull the whole listing into a git-committable metadata tree, edit it locally, push it back. See [Listing round-trip](#listing-round-trip).
 
-**Versions & metadata** — `list_versions`, `list_version_localizations`, `get_version_localization`, _`create_version`_\*, _`update_version_localization`_\* (description, keywords, what's-new, promo text)
+**Versions & metadata** — `list_versions`, `list_version_localizations`, `get_version_localization`, _`create_version`_\*, _`update_version`_\* (release type — auto on approval, manual, or scheduled), _`update_version_localization`_\* (description, keywords, what's-new, promo text)
 
 **Review submissions** — `list_review_submissions`, _`submit_version_for_review`_\*†, _`cancel_review_submission`_\*† — hand a finished version to Apple for review, or withdraw it
 

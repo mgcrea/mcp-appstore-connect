@@ -102,6 +102,7 @@ describe("tool registration", () => {
     expect(writeTools.length).toBeGreaterThan(6);
     for (const name of [
       "app_store_connect_create_version",
+      "app_store_connect_update_version",
       "app_store_connect_update_version_localization",
       "app_store_connect_set_version_build",
       "app_store_connect_submit_version_for_review",
@@ -350,6 +351,120 @@ describe("set_version_build", () => {
 
     expect(result.isError).toBe(true);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("update_version", () => {
+  const VERSION_ID = "01f7fc5e-fef8-49ec-b749-7849cdde3e51";
+  const APP_ID = "6753819990";
+
+  const routed = (appStoreState = "PREPARE_FOR_SUBMISSION"): ReturnType<typeof vi.fn> =>
+    vi.fn(async () =>
+      jsonResponse({
+        data: {
+          id: VERSION_ID,
+          type: "appStoreVersions",
+          attributes: { platform: "MAC_OS", versionString: "1.8.0", appStoreState },
+        },
+      }),
+    );
+
+  const callTool = async (
+    args: Record<string, unknown>,
+    fetchImpl: ReturnType<typeof vi.fn>,
+    name = "app_store_connect_update_version",
+  ): ReturnType<Client["callTool"]> => {
+    const client = await connect(
+      { ...baseConfig, allowWrites: true },
+      fetchImpl as unknown as typeof fetch,
+    );
+    return client.callTool({ name, arguments: args });
+  };
+
+  it("patches only releaseType and never touches relationships", async () => {
+    const fetchImpl = routed();
+
+    const result = await callTool({ versionId: VERSION_ID, releaseType: "MANUAL" }, fetchImpl);
+
+    expect(result.isError).toBeFalsy();
+    const patch = patchCall(fetchImpl);
+    expect(patch?.[0]).toBe(
+      `https://api.appstoreconnect.apple.com/v1/appStoreVersions/${VERSION_ID}`,
+    );
+    expect(JSON.parse(String(patch?.[1].body))).toEqual({
+      data: {
+        id: VERSION_ID,
+        type: "appStoreVersions",
+        attributes: { releaseType: "MANUAL" },
+      },
+    });
+  });
+
+  it("sends both attributes for a scheduled release", async () => {
+    const fetchImpl = routed();
+
+    const result = await callTool(
+      {
+        versionId: VERSION_ID,
+        releaseType: "SCHEDULED",
+        earliestReleaseDate: "2026-08-01T12:00:00-07:00",
+      },
+      fetchImpl,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(String(patchCall(fetchImpl)?.[1].body)).data.attributes).toEqual({
+      releaseType: "SCHEDULED",
+      earliestReleaseDate: "2026-08-01T12:00:00-07:00",
+    });
+  });
+
+  it.each([
+    ["SCHEDULED without a date", { versionId: VERSION_ID, releaseType: "SCHEDULED" }],
+    [
+      "a date on a manual release",
+      {
+        versionId: VERSION_ID,
+        releaseType: "MANUAL",
+        earliestReleaseDate: "2026-08-01T12:00:00-07:00",
+      },
+    ],
+    ["no updatable field", { versionId: VERSION_ID }],
+  ])("rejects %s before any request", async (_label, args) => {
+    const fetchImpl = routed();
+
+    const result = await callTool(args, fetchImpl);
+
+    expect(result.isError).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("refuses a version past PREPARE_FOR_SUBMISSION without issuing a PATCH", async () => {
+    const fetchImpl = routed("READY_FOR_SALE");
+
+    const result = await callTool({ versionId: VERSION_ID, releaseType: "MANUAL" }, fetchImpl);
+
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0]?.text ?? "").toContain("READY_FOR_SALE");
+    expect(patchCall(fetchImpl)).toBeUndefined();
+  });
+
+  it("creates a version already set to manual release", async () => {
+    const fetchImpl = routed();
+
+    const result = await callTool(
+      { appId: APP_ID, versionString: "1.9.0", platform: "MAC_OS", releaseType: "MANUAL" },
+      fetchImpl,
+      "app_store_connect_create_version",
+    );
+
+    expect(result.isError).toBeFalsy();
+    const post = postCall(fetchImpl, "/v1/appStoreVersions");
+    expect(JSON.parse(String(post?.[1].body)).data.attributes).toEqual({
+      platform: "MAC_OS",
+      versionString: "1.9.0",
+      releaseType: "MANUAL",
+    });
   });
 });
 
