@@ -105,6 +105,7 @@ describe("tool registration", () => {
       "app_store_connect_update_version",
       "app_store_connect_update_version_localization",
       "app_store_connect_set_version_build",
+      "app_store_connect_release_version",
       "app_store_connect_submit_version_for_review",
       "app_store_connect_cancel_review_submission",
       "app_store_connect_update_app_info_localization",
@@ -902,6 +903,78 @@ describe("submit_version_for_review", () => {
     expect((result.content as { text: string }[])[0]?.text ?? "").toContain(expected);
     expect(patchCall(fetchImpl)).toBeUndefined();
     expect(postCall(fetchImpl, "/v1/reviewSubmissionItems")).toBeUndefined();
+  });
+});
+
+describe("release_version", () => {
+  const VERSION_ID = "01f7fc5e-fef8-49ec-b749-7849cdde3e51";
+
+  const routed = (appStoreState = "PENDING_DEVELOPER_RELEASE"): ReturnType<typeof vi.fn> =>
+    vi.fn(async (url: string, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "POST") {
+        return jsonResponse({ data: { id: "rel-1", type: "appStoreVersionReleaseRequests" } });
+      }
+      return jsonResponse({
+        data: {
+          id: VERSION_ID,
+          type: "appStoreVersions",
+          attributes: { versionString: "1.8.0", appStoreState },
+        },
+      });
+    });
+
+  const callTool = async (
+    args: Record<string, unknown>,
+    fetchImpl: ReturnType<typeof vi.fn>,
+  ): ReturnType<Client["callTool"]> => {
+    const client = await connect(
+      { ...baseConfig, allowWrites: true },
+      fetchImpl as unknown as typeof fetch,
+    );
+    return client.callTool({ name: "app_store_connect_release_version", arguments: args });
+  };
+
+  it("posts a release request for a version pending developer release", async () => {
+    const fetchImpl = routed();
+
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBeFalsy();
+    const posted = postCall(fetchImpl, "/v1/appStoreVersionReleaseRequests") as [
+      string,
+      RequestInit,
+    ];
+    expect(JSON.parse(String(posted[1].body))).toEqual({
+      data: {
+        type: "appStoreVersionReleaseRequests",
+        relationships: {
+          appStoreVersion: { data: { type: "appStoreVersions", id: VERSION_ID } },
+        },
+      },
+    });
+  });
+
+  it("refuses without an explicit confirm", async () => {
+    const fetchImpl = routed();
+
+    const result = await callTool({ versionId: VERSION_ID }, fetchImpl);
+
+    expect(result.isError).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["READY_FOR_SALE", "already READY_FOR_SALE"],
+    ["PENDING_APPLE_RELEASE", "nothing to release by hand"],
+    ["WAITING_FOR_REVIEW", "only a version Apple has approved"],
+  ])("refuses a %s version without posting", async (state, expected) => {
+    const fetchImpl = routed(state);
+
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0]?.text ?? "").toContain(expected);
+    expect(postCall(fetchImpl, "/v1/appStoreVersionReleaseRequests")).toBeUndefined();
   });
 });
 

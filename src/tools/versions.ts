@@ -14,6 +14,7 @@ import {
   PreconditionError,
   appIdArg,
   compact,
+  confirmArg,
   limitArg,
   versionIdArg,
   wrap,
@@ -28,6 +29,9 @@ const localizationIdArg = z
 
 /** Apple only accepts a build or attribute change while the version is still editable. */
 const EDITABLE_STATES = ["PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED"];
+
+/** The one state a manual release request applies to: approved, waiting on us. */
+const RELEASABLE_STATE = "PENDING_DEVELOPER_RELEASE";
 
 /** How an approved version reaches customers. */
 const RELEASE_TYPES = ["MANUAL", "AFTER_APPROVAL", "SCHEDULED"] as const;
@@ -167,6 +171,29 @@ const assertAttachable = (versionResponse: unknown, buildResponse: unknown): voi
     expired: buildAttrs.expired,
     buildVersionString,
   });
+};
+
+/**
+ * Why this version cannot be released by hand right now. Only an approved version
+ * held back by a MANUAL (or scheduled) release type is waiting on us, and Apple
+ * answers every other state with the same opaque 409 — so name the state, and
+ * where the state is a normal one, say what it means rather than just refusing.
+ */
+const releaseProblem = (appStoreState: unknown): string | undefined => {
+  if (typeof appStoreState !== "string" || appStoreState === RELEASABLE_STATE) return undefined;
+  if (appStoreState === "READY_FOR_SALE") {
+    return "the version is already READY_FOR_SALE — it has been released";
+  }
+  if (appStoreState === "PENDING_APPLE_RELEASE") {
+    return (
+      "the version is PENDING_APPLE_RELEASE — it is scheduled, and Apple releases it at its " +
+      "earliestReleaseDate; there is nothing to release by hand"
+    );
+  }
+  return (
+    `the version is ${appStoreState}; only a version Apple has approved and left in ` +
+    `${RELEASABLE_STATE} can be released by hand`
+  );
 };
 
 export const registerVersionTools = (
@@ -422,6 +449,49 @@ export const registerVersionTools = (
             },
           }),
         );
+      }),
+  );
+
+  server.registerTool(
+    "app_store_connect_release_version",
+    {
+      description:
+        "Release an approved version that is waiting in PENDING_DEVELOPER_RELEASE — the manual " +
+        "'Release This Version' button. Use this after Apple approves a version created with " +
+        "releaseType MANUAL; it puts the version on the App Store for customers. This cannot be " +
+        "undone: a released version can only be pulled by removing the app from sale.",
+      inputSchema: { versionId: versionIdArg, confirm: confirmArg },
+      annotations: { readOnlyHint: false, destructiveHint: true },
+    },
+    async ({ versionId }) =>
+      wrap(async () => {
+        const version = resourceOf(await client.get(`/v1/appStoreVersions/${versionId}`));
+        const attrs = attributesOf(version);
+        const problem = releaseProblem(attrs.appStoreState);
+        if (problem !== undefined) {
+          throw new PreconditionError(`Cannot release this version: ${problem}.`, {
+            appStoreState: attrs.appStoreState,
+            versionString: attrs.versionString,
+          });
+        }
+
+        const released = await client.post("/v1/appStoreVersionReleaseRequests", {
+          data: {
+            type: "appStoreVersionReleaseRequests",
+            relationships: {
+              appStoreVersion: { data: { type: "appStoreVersions", id: versionId } },
+            },
+          },
+        });
+
+        return {
+          versionId,
+          versionString: attrs.versionString,
+          // Apple answers the request itself, not the version — the version stays
+          // PENDING_DEVELOPER_RELEASE for a moment and then flips to READY_FOR_SALE,
+          // so re-read it with list_versions rather than trusting a state echoed here.
+          releaseRequest: summarizeResponse(released),
+        };
       }),
   );
 };
