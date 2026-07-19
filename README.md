@@ -1,5 +1,8 @@
 # @mgcrea/mcp-appstore-connect
 
+[![npm version](https://img.shields.io/npm/v/@mgcrea/mcp-appstore-connect.svg)](https://www.npmjs.com/package/@mgcrea/mcp-appstore-connect)
+[![Docker Image Version](https://img.shields.io/docker/v/mgcrea/mcp-appstore-connect?sort=semver&logo=docker&label=docker)](https://hub.docker.com/r/mgcrea/mcp-appstore-connect)
+
 Model Context Protocol server for the Apple [App Store Connect API](https://developer.apple.com/documentation/appstoreconnectapi) — inspect your apps, versions, builds, TestFlight, sales and users, and (opt-in) edit metadata and manage testers, straight from an MCP client like Claude.
 
 > **Unofficial.** Not affiliated with or endorsed by Apple. It talks to Apple's public App Store Connect REST API using an API key you generate yourself.
