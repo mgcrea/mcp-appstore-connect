@@ -1,7 +1,7 @@
 # @mgcrea/mcp-appstore-connect
 
-[![npm version](https://img.shields.io/npm/v/@mgcrea/mcp-appstore-connect.svg)](https://www.npmjs.com/package/@mgcrea/mcp-appstore-connect)
-[![Docker Image Version](https://img.shields.io/docker/v/mgcrea/mcp-appstore-connect?sort=semver&logo=docker&label=docker)](https://hub.docker.com/r/mgcrea/mcp-appstore-connect)
+[![npm version](https://img.shields.io/npm/v/@mgcrea/mcp-appstore-connect.svg?style=for-the-badge)](https://www.npmjs.com/package/@mgcrea/mcp-appstore-connect)
+[![GHCR](https://img.shields.io/badge/ghcr.io-container_image-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://github.com/mgcrea/mcp-appstore-connect/pkgs/container/mcp-appstore-connect)
 
 Model Context Protocol server for the Apple [App Store Connect API](https://developer.apple.com/documentation/appstoreconnectapi) — inspect your apps, versions, builds, TestFlight, sales and users, and (opt-in) edit metadata and manage testers, straight from an MCP client like Claude.
 
@@ -95,7 +95,7 @@ Runs the container image published to GHCR. The `.p8` never goes into the image 
 }
 ```
 
-`-i` keeps stdin open, which the stdio transport needs — don't drop it. The left side of `-v` is the host path to your `.p8`; the container only ever sees `/keys/key.p8`. The same image is mirrored on Docker Hub as `mgcrea/mcp-appstore-connect` if you prefer that registry.
+`-i` keeps stdin open, which the stdio transport needs — don't drop it. The left side of `-v` is the host path to your `.p8`; the container only ever sees `/keys/key.p8`. GHCR is the only registry CI publishes to — it's what carries the provenance/SBOM/cosign signature described in **Verify** below.
 
 ### C. From source (development)
 
