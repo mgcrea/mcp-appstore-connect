@@ -122,8 +122,15 @@ const assertSubmittable = (versionResponse: unknown): { appId: string; platform:
     );
   }
 
-  if (appId === undefined || typeof platform !== "string") {
-    problems.push("the version response carries no app or platform — cannot build a submission");
+  if (appId === undefined) {
+    problems.push(
+      "the version response carries no app relationship, so the app it belongs to cannot be " +
+        "determined — this is a bug in this tool, not something you can fix in App Store Connect",
+    );
+  }
+
+  if (typeof platform !== "string") {
+    problems.push("the version response carries no platform — cannot open a review submission");
   }
 
   if (problems.length > 0) {
@@ -131,6 +138,7 @@ const assertSubmittable = (versionResponse: unknown): { appId: string; platform:
       appStoreState,
       versionString: attrs.versionString,
       platform,
+      appId,
       buildId,
     });
   }
@@ -191,8 +199,11 @@ export const registerSubmissionTools = (
     },
     async ({ versionId }) =>
       wrap(async () => {
+        // `app` must be included explicitly: unlike `build`, Apple omits that
+        // relationship entirely from a bare GET, so the app id is not derivable
+        // without it.
         const { appId, platform } = assertSubmittable(
-          await client.get(`/v1/appStoreVersions/${versionId}`, { include: "build" }),
+          await client.get(`/v1/appStoreVersions/${versionId}`, { include: "app,build" }),
         );
 
         // One submission per app+platform: an in-flight one has to be cancelled

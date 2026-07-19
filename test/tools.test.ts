@@ -358,9 +358,16 @@ describe("submit_version_for_review", () => {
   const APP_ID = "6753819990";
   const SUBMISSION_ID = "sub-1";
 
+  /**
+   * Shaped like Apple's actual answer: `build` is always in `relationships`, but
+   * the `app` key is absent entirely unless the request asked for it via
+   * `include`. A fixture that handed back `app` unconditionally is what let the
+   * first cut of this tool ship broken.
+   */
   const versionBody = (
     attrs: Record<string, unknown> = {},
     relationships: Record<string, unknown> = {},
+    withApp = false,
   ): unknown => ({
     data: {
       id: VERSION_ID,
@@ -372,8 +379,8 @@ describe("submit_version_for_review", () => {
         ...attrs,
       },
       relationships: {
-        app: { data: { id: APP_ID, type: "apps" } },
         build: { data: { id: "build-1", type: "builds" } },
+        ...(withApp ? { app: { data: { id: APP_ID, type: "apps" } } } : {}),
         ...relationships,
       },
     },
@@ -386,7 +393,8 @@ describe("submit_version_for_review", () => {
   });
 
   type Routes = {
-    version?: unknown;
+    /** Receives whether the request asked to include the app relationship. */
+    version?: (withApp: boolean) => unknown;
     /** Submissions already with Apple, keyed off the in-flight filter. */
     inFlight?: unknown[];
     /** Not-yet-submitted drafts to reuse. */
@@ -412,7 +420,8 @@ describe("submit_version_for_review", () => {
         return jsonResponse({ data: submission("READY_FOR_REVIEW") });
       }
       if (parsed.pathname.includes("/appStoreVersions/")) {
-        return jsonResponse(routes.version ?? versionBody());
+        const withApp = (parsed.searchParams.get("include") ?? "").split(",").includes("app");
+        return jsonResponse(routes.version?.(withApp) ?? versionBody({}, {}, withApp));
       }
       return jsonResponse({ data: submission("WAITING_FOR_REVIEW") });
     });
@@ -500,15 +509,45 @@ describe("submit_version_for_review", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  // Apple omits the `app` relationship unless asked, so deriving the app id from
+  // a bare GET fails on every real version. Assert the include, not just that the
+  // happy path works against a lenient fixture.
+  it("asks Apple to include the app relationship", async () => {
+    const fetchImpl = routed();
+
+    await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    const versionCall = fetchImpl.mock.calls.find((call) =>
+      String(call[0]).includes("/v1/appStoreVersions/"),
+    );
+    const include = new URL(String(versionCall?.[0])).searchParams.get("include") ?? "";
+    expect(include.split(",")).toContain("app");
+  });
+
+  it("names the app relationship, not the platform, when the app id is missing", async () => {
+    // Force the pre-fix shape: a response that never carries `app`.
+    const fetchImpl = routed({ version: () => versionBody({}, {}, false) });
+
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBe(true);
+    const text = (result.content as { text: string }[])[0]?.text ?? "";
+    expect(text).toContain("app relationship");
+    expect(text).not.toContain("carries no platform");
+  });
+
   it.each([
     [
       "a version with no build attached",
-      { version: versionBody({}, { build: { data: null } }) },
+      { version: (withApp: boolean) => versionBody({}, { build: { data: null } }, withApp) },
       "no build is attached",
     ],
     [
       "a version already past submission",
-      { version: versionBody({ appStoreState: "READY_FOR_SALE" }) },
+      {
+        version: (withApp: boolean) =>
+          versionBody({ appStoreState: "READY_FOR_SALE" }, {}, withApp),
+      },
       "READY_FOR_SALE",
     ],
     [
