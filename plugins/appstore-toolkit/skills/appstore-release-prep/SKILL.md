@@ -1,6 +1,6 @@
 ---
 name: appstore-release-prep
-description: Write the release documentation for an Xcode app about to be submitted to the App Store — the CHANGELOG entry for the new version, and every App Store Connect metadata field (What's New, promotional text, description, keywords, subtitle) in a Listing/ or fastlane/metadata/ tree, APPSTORE.md, or equivalent. Use this whenever the user is preparing, cutting, or submitting a release; asks to update the CHANGELOG or the App Store copy "with the latest features"; asks what's new since the last release or what still needs documenting; asks for release notes, store description, keywords, subtitle, or promo text; or says a field is over Apple's character limit. Reach for it even when they only mention one of the two files, or phrase it as "get this ready to ship" without naming a file — the two are two renderings of one release and drift apart when written separately. Also use it to audit a listing before submission, or when store copy reads as AI-written and needs the em dashes taken out.
+description: Write the release documentation for an Xcode app about to be submitted to the App Store — the CHANGELOG entry for the new version, and every App Store Connect metadata field (What's New, promotional text, description, keywords, subtitle) in a Listing/ or fastlane/metadata/ tree, APPSTORE.md, or equivalent. Use this whenever the user is preparing, cutting, or submitting a release; asks to update the CHANGELOG or the App Store copy "with the latest features"; asks what's new since the last release or what still needs documenting; asks for release notes, store description, keywords, subtitle, or promo text; or says a field is over Apple's character limit. Reach for it even when they only mention one of the two files, or phrase it as "get this ready to ship" without naming a file — the two are two renderings of one release and drift apart when written separately. Also use it to audit a listing before submission, or when store copy reads as AI-written and needs the em dashes taken out. It also covers the shipping step itself when the user explicitly asks for it — archiving and uploading a build with App Store Connect API credentials, attaching it to the version, submitting for review, and repricing an in-app purchase — including why a build number in a commit message is not an uploaded build.
 ---
 
 # App Store release prep
@@ -264,5 +264,115 @@ regenerating them, and `app_store_connect_list_screenshot_sets` will tell you wh
 version has a complete set — an incomplete one blocks submission, and nothing in this
 audit can see it.
 
-Do not bump versions, commit, tag, or submit. This skill writes documents; shipping
-is the user's call.
+Do not bump versions, commit, tag, or submit **on your own initiative**. This skill
+writes documents; shipping is the user's call. When they do ask you to ship it, section 7
+is the path.
+
+## 7. Cutting the build and submitting — only when asked
+
+Everything above is reversible. This section is not: it uploads a binary and hands a
+version to Apple. Do it only on an explicit "submit it" / "ship it", never as the natural
+next step after the copy is clean.
+
+### Check a build actually exists before promising anything
+
+```
+app_store_connect_list_builds { appId, limit: 5 }
+```
+
+**A build number in a commit message or in `CURRENT_PROJECT_VERSION` is not a build.**
+A repo can carry `chore: bump version to 1.4.1 (build 99)`, have `CURRENT_PROJECT_VERSION
+= 99` in the pbxproj, and have nothing newer than build 92 on App Store Connect, because
+nobody ran the archive. `list_builds` is the only source of truth. Check it before you
+tell anyone submission is one call away.
+
+### The binary has to match the metadata you just pushed
+
+A build that predates today's UI work will contradict the screenshots you uploaded for
+the same version. If a screenshot shows a price-free "Unlock Pro" button and the newest
+uploaded build still contains a `?? "$4.99"` fallback, submitting that build ships a
+binary its own store page misrepresents. After archiving, check the artifact rather than
+trusting the diff:
+
+```bash
+BIN=build/App.xcarchive/Products/Applications/App.app/Contents/MacOS/App
+strings "$BIN" | grep -c 'Unlock Pro'   # the new string is in
+strings "$BIN" | grep '4\.99'           # the old one is gone (expect no output)
+```
+
+### Credentials
+
+An ASC API key is usually already on the machine, in one of two places:
+
+- `~/.config/appstore-connect/config.json` — `{keyId, issuerId, p8Path}`
+- the MCP server's own env in `.mcp.json` — `APP_STORE_CONNECT_KEY_ID`,
+  `APP_STORE_CONNECT_ISSUER_ID`, `APP_STORE_CONNECT_P8_PATH`
+
+The MCP holds those internally and exposes no upload-build tool, so uploading is a shell
+job with `altool`. `altool` does **not** take a path to the key: it takes the key id and
+searches `./private_keys`, `~/private_keys`, `~/.private_keys`, and
+`~/.appstoreconnect/private_keys`. A key stored anywhere else has to be copied into one of
+those first. **Say that you copied a private key, and offer to remove the copy afterwards**
+— duplicating a credential is a side effect the user did not ask for, even when it is the
+only way the tool works.
+
+### Archive, export, validate, upload
+
+```bash
+xcodebuild -project App.xcodeproj -scheme App -configuration Release \
+  -destination 'platform=macOS' -archivePath build/App.xcarchive archive
+
+xcodebuild -exportArchive -archivePath build/App.xcarchive \
+  -exportOptionsPlist exportOptions.plist -exportPath build/export
+
+xcrun altool --validate-app -f build/export/App.pkg -t macos \
+  --apiKey <KEY_ID> --apiIssuer <ISSUER_ID>          # do this first, it is free
+xcrun altool --upload-app  -f build/export/App.pkg -t macos \
+  --apiKey <KEY_ID> --apiIssuer <ISSUER_ID>
+```
+
+`exportOptions.plist` needs `method = app-store-connect` (older Xcode called it
+`app-store`), the `teamID`, and `manageAppVersionAndBuildNumber = false` — leave that true
+and Xcode silently renumbers the build out from under you.
+
+Always `--validate-app` before `--upload-app`. It catches signing, entitlement, and
+Info.plist problems in seconds, against a failed upload that costs a full round trip.
+
+### Attach and submit
+
+Apple does not register the build immediately — `list_builds` returns nothing for a few
+minutes after `UPLOAD SUCCEEDED`. Poll on a timer rather than in a tight loop, and wait
+for `processingState: VALID`.
+
+```
+app_store_connect_set_version_build         { versionId, buildId }
+app_store_connect_submit_version_for_review { versionId, confirm: true }
+```
+
+The version must be `PREPARE_FOR_SUBMISSION` or `DEVELOPER_REJECTED`, and the build must
+be `VALID`, unexpired, and carry the same version string. Everything Apple requires —
+screenshots, age rating, export compliance, review details — must already be in place;
+`submit_version_for_review` fails rather than telling you which one is missing.
+
+Approval is not release. A version created with `releaseType: MANUAL` sits in
+`PENDING_DEVELOPER_RELEASE` until someone releases it, which is usually what you want:
+it keeps the release moment under the user's control.
+
+### Submitting from a dirty tree
+
+If the changes going into the binary are uncommitted, **say so before submitting**. A
+shipped build that corresponds to no commit cannot be reproduced or bisected later, and
+many repos have a `Scripts/releaseVersion.sh`-style helper that commits and tags. Offer it;
+do not run it unprompted.
+
+### If the release also changes price
+
+IAP repricing is `app_store_connect_set_in_app_purchase_price`, and it **replaces the whole
+price schedule** — read `get_iap_price_schedule` first so you know what you are dropping.
+Price points are per-territory ids from `list_iap_price_points`; every other territory is
+derived from the base one.
+
+The trap is ordering, not mechanics. If any live screenshot has a price baked into the
+image, repricing before the new build is **released** makes the store page advertise one
+price and charge another, for the whole review period. Reprice after the new version is
+live, and hold any website price edits until the same moment.
