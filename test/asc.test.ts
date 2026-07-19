@@ -106,6 +106,96 @@ describe("AppStoreConnectClient retry & errors", () => {
   });
 });
 
+const uploadClient = (
+  fetchImpl: ReturnType<typeof vi.fn>,
+  provider: TokenProvider = spyProvider(),
+): AppStoreConnectClient =>
+  new AppStoreConnectClient({
+    tokenProvider: provider,
+    fetch: fetchImpl as unknown as typeof fetch,
+  });
+
+describe("AppStoreConnectClient.uploadAsset", () => {
+  const data = Buffer.from("0123456789");
+
+  it("PUTs each byte range with Apple's headers, minus the unsettable ones", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+
+    await uploadClient(fetchImpl).uploadAsset(
+      [
+        {
+          method: "PUT",
+          url: "https://upload.example/part1",
+          offset: 0,
+          length: 4,
+          requestHeaders: [
+            { name: "Content-Type", value: "image/png" },
+            { name: "Content-Length", value: "4" },
+            { name: "Host", value: "upload.example" },
+          ],
+        },
+        { method: "PUT", url: "https://upload.example/part2", offset: 4, length: 6 },
+      ],
+      data,
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(callUrl(fetchImpl)).toBe("https://upload.example/part1");
+    expect(callInit(fetchImpl).headers).toEqual({ "Content-Type": "image/png" });
+    expect(Buffer.from(callInit(fetchImpl).body as Uint8Array).toString()).toBe("0123");
+    expect(Buffer.from(callInit(fetchImpl, 1).body as Uint8Array).toString()).toBe("456789");
+  });
+
+  it("never attaches an Authorization header", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+
+    await uploadClient(fetchImpl).uploadAsset(
+      [{ url: "https://upload.example/part1", offset: 0, length: data.byteLength }],
+      data,
+    );
+
+    const headers = callInit(fetchImpl).headers as Record<string, string>;
+    expect(Object.keys(headers).map((k) => k.toLowerCase())).not.toContain("authorization");
+  });
+
+  it("does not remint the token on a 401 — a pre-signed URL has simply expired", async () => {
+    const provider = spyProvider();
+    const fetchImpl = vi.fn(async () => new Response("expired", { status: 401 }));
+
+    await expect(
+      uploadClient(fetchImpl, provider).uploadAsset(
+        [{ url: "https://upload.example/part1", offset: 0, length: data.byteLength }],
+        data,
+      ),
+    ).rejects.toThrow(/401/);
+
+    expect(provider.invalidate).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a file shorter than the reserved range instead of uploading a truncated body", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+
+    await expect(
+      uploadClient(fetchImpl).uploadAsset(
+        [{ url: "https://upload.example/part1", offset: 0, length: 99 }],
+        data,
+      ),
+    ).rejects.toThrow(/smaller than the fileSize reserved/);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("fails clearly when there are no upload operations", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+
+    await expect(uploadClient(fetchImpl).uploadAsset([], data)).rejects.toThrow(
+      /no uploadOperations/,
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
 describe("AppStoreConnectClient.downloadReport", () => {
   it("gunzips a gzipped TSV body and returns plain text", async () => {
     const tsv = "Provider\tSKU\tUnits\nAPPLE\tcom.acme\t42\n";

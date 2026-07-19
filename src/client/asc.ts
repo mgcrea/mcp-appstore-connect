@@ -58,6 +58,69 @@ const buildQuery = (query: Query | undefined): string => {
   return qs ? `?${qs}` : "";
 };
 
+type RetryPolicy = {
+  maxRetries: number;
+  /** Prefix for the debug/warn lines, e.g. `GET https://…` or `PUT asset part 1/2`. */
+  label: string;
+  logger?: Logger | undefined;
+  /**
+   * Invoked before retrying a 401. Omitted for Apple's pre-signed upload URLs,
+   * where a 401/403 means the URL expired and reminting the JWT cannot help.
+   */
+  onUnauthorized?: (() => void) | undefined;
+};
+
+/** Run `perform` until it yields a non-retryable response or the budget runs out. */
+const withRetry = async (
+  perform: () => Promise<Response>,
+  policy: RetryPolicy,
+): Promise<Response> => {
+  let attempt = 0;
+
+  for (;;) {
+    policy.logger?.debug?.(`[appstore-connect] ${policy.label} (attempt ${attempt + 1})`);
+    const res = await perform();
+
+    if (res.status === 401 && policy.onUnauthorized && attempt < policy.maxRetries) {
+      policy.logger?.warn?.(`[appstore-connect] HTTP 401 — reminting token and retrying`);
+      policy.onUnauthorized();
+      attempt += 1;
+      continue;
+    }
+
+    if ((res.status === 429 || res.status >= 500) && attempt < policy.maxRetries) {
+      const delay = retryAfterMs(res) ?? backoffMs(attempt);
+      policy.logger?.warn?.(`[appstore-connect] HTTP ${res.status} — retrying in ${delay}ms`);
+      await sleep(delay);
+      attempt += 1;
+      continue;
+    }
+
+    return res;
+  }
+};
+
+/** One leg of an asset upload, as handed back in an `uploadOperations` attribute. */
+export type UploadOperation = {
+  method?: string;
+  url?: string;
+  length?: number;
+  offset?: number;
+  requestHeaders?: { name?: string; value?: string }[];
+};
+
+/**
+ * Apple echoes `Content-Length` back in `requestHeaders`, but undici computes it
+ * itself and rejects the request when it is set by hand. Same for the other
+ * connection-level headers, so drop them rather than passing them through.
+ */
+const UNSETTABLE_UPLOAD_HEADERS = new Set([
+  "content-length",
+  "host",
+  "connection",
+  "transfer-encoding",
+]);
+
 /**
  * Minimal fetch-based client for the App Store Connect API. Paths are absolute
  * (`/v1/apps`). Retries a 401 (reminting the token first) and 429/5xx with
@@ -89,38 +152,89 @@ export class AppStoreConnectClient {
   ): Promise<Response> {
     const url = `${this.baseUrl}${path}${buildQuery(opts.query)}`;
     const hasBody = opts.body !== undefined;
-    let attempt = 0;
 
-    for (;;) {
-      this.logger?.debug?.(`[appstore-connect] ${method} ${url} (attempt ${attempt + 1})`);
-      const token = await this.tokenProvider.getToken();
-      const res = await this.fetchImpl(url, {
-        method,
-        headers: {
-          Accept: accept,
-          Authorization: `Bearer ${token}`,
-          "User-Agent": this.userAgent,
-          ...(hasBody ? { "Content-Type": "application/json" } : {}),
-        },
-        ...(hasBody ? { body: JSON.stringify(opts.body) } : {}),
-      });
+    return withRetry(
+      async () => {
+        const token = await this.tokenProvider.getToken();
+        return this.fetchImpl(url, {
+          method,
+          headers: {
+            Accept: accept,
+            Authorization: `Bearer ${token}`,
+            "User-Agent": this.userAgent,
+            ...(hasBody ? { "Content-Type": "application/json" } : {}),
+          },
+          ...(hasBody ? { body: JSON.stringify(opts.body) } : {}),
+        });
+      },
+      {
+        maxRetries: this.maxRetries,
+        label: `${method} ${url}`,
+        logger: this.logger,
+        onUnauthorized: () => this.tokenProvider.invalidate(),
+      },
+    );
+  }
 
-      if (res.status === 401 && attempt < this.maxRetries) {
-        this.logger?.warn?.(`[appstore-connect] HTTP 401 — reminting token and retrying`);
-        this.tokenProvider.invalidate();
-        attempt += 1;
-        continue;
+  /**
+   * Execute the `uploadOperations` Apple hands back when an asset is reserved
+   * (a screenshot, app preview, …). These URLs are absolute and pre-signed, so
+   * this deliberately skips `baseUrl`, the `Authorization` header and the JSON
+   * encoding that `request()` applies — sending a Bearer token to Apple's blob
+   * store gets the request rejected.
+   *
+   * Parts go up sequentially: assets are a few MB and usually a single
+   * operation, so parallelism would add failure modes for no real gain. The
+   * URLs are short-lived and single-use, so a failure here is not resumable.
+   */
+  async uploadAsset(operations: UploadOperation[], data: Uint8Array): Promise<void> {
+    if (operations.length === 0) {
+      throw new Error(
+        "App Store Connect returned no uploadOperations for this asset. It may already have " +
+          "been uploaded, or the reservation is in an unexpected state.",
+      );
+    }
+
+    for (const [index, op] of operations.entries()) {
+      const part = `part ${index + 1}/${operations.length}`;
+      if (!op.url) {
+        throw new Error(`uploadOperations[${index}] has no url — cannot upload ${part}.`);
       }
 
-      if ((res.status === 429 || res.status >= 500) && attempt < this.maxRetries) {
-        const delay = retryAfterMs(res) ?? backoffMs(attempt);
-        this.logger?.warn?.(`[appstore-connect] HTTP ${res.status} — retrying in ${delay}ms`);
-        await sleep(delay);
-        attempt += 1;
-        continue;
+      const offset = op.offset ?? 0;
+      const length = op.length ?? data.byteLength - offset;
+      // A view, not a copy — `fetch` honors byteOffset/byteLength.
+      const chunk = data.subarray(offset, offset + length);
+      if (chunk.byteLength !== length) {
+        throw new Error(
+          `The file is smaller than the fileSize reserved with App Store Connect (needed bytes ` +
+            `${offset}..${offset + length}, file is ${data.byteLength} bytes). The file changed ` +
+            `on disk between reservation and upload — re-run the upload.`,
+        );
       }
 
-      return res;
+      const headers: Record<string, string> = {};
+      for (const header of op.requestHeaders ?? []) {
+        if (!header.name || header.value === undefined) continue;
+        if (UNSETTABLE_UPLOAD_HEADERS.has(header.name.toLowerCase())) continue;
+        headers[header.name] = header.value;
+      }
+
+      const url = op.url;
+      const res = await withRetry(
+        () => this.fetchImpl(url, { method: op.method ?? "PUT", headers, body: chunk }),
+        { maxRetries: this.maxRetries, label: `PUT asset ${part}`, logger: this.logger },
+      );
+
+      if (!res.ok) {
+        const text = (await res.text()).slice(0, 500);
+        throw new AppStoreConnectApiError(
+          `Asset upload ${part} failed: HTTP ${res.status} ${res.statusText}` +
+            (text ? ` — ${text}` : "") +
+            `. App Store Connect upload URLs are short-lived and single-use; re-run the upload.`,
+          { status: res.status, errors: text },
+        );
+      }
     }
   }
 
