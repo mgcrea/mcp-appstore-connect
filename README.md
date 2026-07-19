@@ -119,7 +119,11 @@ npx @modelcontextprotocol/inspector npx -y @mgcrea/mcp-appstore-connect
 
 **Apps** — `list_apps`, `get_app`
 
+**Listing round-trip** — `export_listing`, _`apply_listing`_\* — pull the whole listing into a git-committable metadata tree, edit it locally, push it back. See [Listing round-trip](#listing-round-trip).
+
 **Versions & metadata** — `list_versions`, `list_version_localizations`, `get_version_localization`, _`create_version`_\*, _`update_version_localization`_\* (description, keywords, what's-new, promo text)
+
+**App info** — `list_app_infos`, `list_app_info_localizations`, `get_app_info_localization`, _`update_app_info_localization`_\* (name, subtitle, privacy policy — the fields that outlive a version)
 
 **Screenshots** — `list_screenshot_sets`, `list_screenshots`, `get_screenshot`, _`upload_screenshot`_\*, _`delete_screenshot`_\*†, _`delete_screenshot_set`_\*†, _`reorder_screenshots`_\*†
 
@@ -138,6 +142,55 @@ npx @modelcontextprotocol/inspector npx -y @mgcrea/mcp-appstore-connect
 _Italic\*_ tools are writes, hidden unless `APP_STORE_CONNECT_ALLOW_WRITES=1`. † additionally requires `confirm: true`.
 
 Tool names are prefixed `app_store_connect_` (omitted above for brevity).
+
+## Listing round-trip
+
+`export_listing` returns the complete listing — name, subtitle, description, keywords,
+what's-new, promotional text and URLs, across every locale — as a set of files to write
+into your repo:
+
+```
+fastlane/metadata/
+  .listing.json          # ids + baseline digests. Commit it; never hand-edit it.
+  en-US/
+    name.txt  subtitle.txt  description.txt  keywords.txt
+    release_notes.txt  promotional_text.txt
+    marketing_url.txt  support_url.txt  privacy_url.txt
+  fr-FR/
+    ...
+```
+
+This is the layout `fastlane deliver` already uses, so the tree interops with it. One
+file per field means the file content *is* the value, byte for byte — a description
+containing `## Keywords`, a `---` rule or a fenced code block is just text, and `git
+diff` shows you the field that changed rather than a line number in a wall of copy.
+
+The server never writes to disk: `export_listing` hands back `{path, content}` pairs and
+your agent writes them, so every write stays under your own permission prompt and nothing
+depends on host paths being visible inside Docker.
+
+Editing and pushing back:
+
+```
+export_listing { appId }                       # version defaults to "latest"
+# ...edit the .txt files, commit, review...
+apply_listing  { files: [...] }                # dry run by default
+apply_listing  { files: [...], dryRun: false, confirm: true }
+```
+
+- `version` accepts `"latest"` (the one you're preparing), `"live"` (on sale) or an exact
+  `"1.4.0"`. Versions are ordered numerically, so `1.10.0` beats `1.9.0`.
+- Pass **only the files you changed**, plus `.listing.json` — it carries the localization
+  ids and the per-field digests recorded at export.
+- Those digests make apply a three-way merge. A field edited in App Store Connect's web UI
+  since your export is reported as a **conflict** and skipped, rather than silently
+  overwritten; re-export and merge, or pass `force: true`.
+- **An empty file clears a field; an absent file leaves it alone.**
+- Any field over Apple's limit aborts the whole apply before the first write — a
+  half-applied listing is worse than an untouched one.
+- `format: "review"` renders a read-only markdown summary with character counts, for when
+  you just want to read the listing. Nothing parses it back.
+- If `fastlane/metadata/` already exists, diff before overwriting it.
 
 ## Notes
 
