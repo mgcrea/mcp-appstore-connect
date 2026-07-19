@@ -239,7 +239,7 @@ does not flag those; leave them unless the user asks otherwise.
 config. They are short label-like fragments where a dash reads as formatting, and the
 cost of "fixing" one is out of all proportion: it invalidates the goldens and forces a
 full recapture plus a re-upload of a screenshot set that was already complete. The
-check exists to catch machine-sounding *prose* — description, release notes, promo
+check exists to catch machine-sounding _prose_ — description, release notes, promo
 text, subtitle. Hold that line there.
 
 Also keep hardcoded prices out of copy where you can — a `$4.99` in the description is
