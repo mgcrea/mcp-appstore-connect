@@ -1,0 +1,13 @@
+{
+  "name": "mgcrea-appstore",
+  "owner": {
+    "name": "Olivier Louvignes",
+    "url": "https://github.com/mgcrea"
+  },
+  "plugins": [
+    {
+      "name": "appstore-toolkit",
+      "source": "./plugins/appstore-toolkit"
+    }
+  ]
+}

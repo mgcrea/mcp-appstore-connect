@@ -44,6 +44,11 @@ const toolNames = async (client: Client): Promise<string[]> =>
 const callArgs = (fetchImpl: ReturnType<typeof vi.fn>, index = 0): [string, RequestInit] =>
   fetchImpl.mock.calls[index] as unknown as [string, RequestInit];
 
+const patchCall = (fetchImpl: ReturnType<typeof vi.fn>): [string, RequestInit] | undefined =>
+  fetchImpl.mock.calls.find((call) => (call[1] as RequestInit | undefined)?.method === "PATCH") as
+    | [string, RequestInit]
+    | undefined;
+
 describe("tool registration", () => {
   let readOnly: string[];
   let withWrites: string[];
@@ -87,6 +92,7 @@ describe("tool registration", () => {
     for (const name of [
       "app_store_connect_create_version",
       "app_store_connect_update_version_localization",
+      "app_store_connect_set_version_build",
       "app_store_connect_update_app_info_localization",
       "app_store_connect_apply_listing",
       "app_store_connect_upload_screenshot",
@@ -175,6 +181,162 @@ describe("destructive tools", () => {
       "https://api.appstoreconnect.apple.com/v1/betaGroups/g1/relationships/betaTesters",
     );
     expect(init.method).toBe("DELETE");
+  });
+});
+
+describe("set_version_build", () => {
+  const VERSION_ID = "01f7fc5e-fef8-49ec-b749-7849cdde3e51";
+  const BUILD_ID = "0c15a960-b73d-4893-8788-cfbab4ca072b";
+
+  const versionBody = (overrides: Record<string, unknown> = {}): unknown => ({
+    data: {
+      id: VERSION_ID,
+      type: "appStoreVersions",
+      attributes: {
+        platform: "MAC_OS",
+        versionString: "1.8.0",
+        appStoreState: "PREPARE_FOR_SUBMISSION",
+        ...overrides,
+      },
+      relationships: { app: { data: { id: "6753819990", type: "apps" } } },
+    },
+  });
+
+  // `builds.attributes.version` is the build number (192); the marketing
+  // version only arrives via the included preReleaseVersion.
+  const buildBody = (
+    overrides: Record<string, unknown> = {},
+    preRelease: Record<string, unknown> = {},
+    appId = "6753819990",
+  ): unknown => ({
+    data: {
+      id: BUILD_ID,
+      type: "builds",
+      attributes: { version: "192", processingState: "VALID", expired: false, ...overrides },
+      relationships: { app: { data: { id: appId, type: "apps" } } },
+    },
+    included: [
+      {
+        id: "pre-1",
+        type: "preReleaseVersions",
+        attributes: { version: "1.8.0", platform: "MAC_OS", ...preRelease },
+      },
+    ],
+  });
+
+  /** Route by URL: the happy path is two preflight GETs then the PATCH. */
+  const routed = (version: unknown, build: unknown): ReturnType<typeof vi.fn> =>
+    vi.fn(async (url: string) => {
+      if (url.includes("/v1/builds/")) return jsonResponse(build);
+      if (url.includes("/appStoreVersions/")) return jsonResponse(version);
+      return jsonResponse({ data: {} });
+    });
+
+  const callTool = async (
+    args: Record<string, unknown>,
+    fetchImpl: ReturnType<typeof vi.fn>,
+  ): ReturnType<Client["callTool"]> => {
+    const client = await connect(
+      { ...baseConfig, allowWrites: true },
+      fetchImpl as unknown as typeof fetch,
+    );
+    return client.callTool({ name: "app_store_connect_set_version_build", arguments: args });
+  };
+
+  it("attaches a build with the build relationship", async () => {
+    const fetchImpl = routed(versionBody(), buildBody());
+
+    const result = await callTool({ versionId: VERSION_ID, buildId: BUILD_ID }, fetchImpl);
+
+    expect(result.isError).toBeFalsy();
+    const patch = patchCall(fetchImpl);
+    expect(patch?.[0]).toBe(
+      `https://api.appstoreconnect.apple.com/v1/appStoreVersions/${VERSION_ID}`,
+    );
+    expect(JSON.parse(String(patch?.[1].body))).toEqual({
+      data: {
+        id: VERSION_ID,
+        type: "appStoreVersions",
+        relationships: { build: { data: { id: BUILD_ID, type: "builds" } } },
+      },
+    });
+  });
+
+  it("sideloads the preReleaseVersion when preflighting the build", async () => {
+    const fetchImpl = routed(versionBody(), buildBody());
+
+    await callTool({ versionId: VERSION_ID, buildId: BUILD_ID }, fetchImpl);
+
+    const buildCall = fetchImpl.mock.calls.find((call) => String(call[0]).includes("/v1/builds/"));
+    expect(new URL(String(buildCall?.[0])).searchParams.get("include")).toBe("preReleaseVersion");
+  });
+
+  it("detaches with a null relationship and never reads a build", async () => {
+    const fetchImpl = routed(versionBody(), buildBody());
+
+    const result = await callTool({ versionId: VERSION_ID, detach: true }, fetchImpl);
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(String(patchCall(fetchImpl)?.[1].body)).data.relationships.build).toEqual({
+      data: null,
+    });
+    expect(fetchImpl.mock.calls.some((call) => String(call[0]).includes("/v1/builds/"))).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    [
+      "a version past PREPARE_FOR_SUBMISSION",
+      versionBody({ appStoreState: "READY_FOR_SALE" }),
+      buildBody(),
+      "READY_FOR_SALE",
+    ],
+    [
+      "a still-processing build",
+      versionBody(),
+      buildBody({ processingState: "PROCESSING" }),
+      "PROCESSING",
+    ],
+    ["an invalid build", versionBody(), buildBody({ processingState: "INVALID" }), "INVALID"],
+    ["an expired build", versionBody(), buildBody({ expired: true }), "expired"],
+    ["a build from another app", versionBody(), buildBody({}, {}, "9999999999"), "belongs to app"],
+    ["a mismatched version string", versionBody(), buildBody({}, { version: "1.7.1" }), "1.7.1"],
+    ["a mismatched platform", versionBody(), buildBody({}, { platform: "IOS" }), "IOS"],
+  ])("refuses %s without issuing a PATCH", async (_label, version, build, expected) => {
+    const fetchImpl = routed(version, build);
+
+    const result = await callTool({ versionId: VERSION_ID, buildId: BUILD_ID }, fetchImpl);
+
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0]?.text ?? "").toContain(expected);
+    expect(patchCall(fetchImpl)).toBeUndefined();
+  });
+
+  it("reports every failing precondition at once", async () => {
+    const fetchImpl = routed(
+      versionBody({ appStoreState: "READY_FOR_SALE" }),
+      buildBody({ processingState: "PROCESSING", expired: true }),
+    );
+
+    const result = await callTool({ versionId: VERSION_ID, buildId: BUILD_ID }, fetchImpl);
+
+    const text = (result.content as { text: string }[])[0]?.text ?? "";
+    expect(text).toContain("READY_FOR_SALE");
+    expect(text).toContain("PROCESSING");
+    expect(text).toContain("expired");
+  });
+
+  it.each([
+    ["both buildId and detach", { versionId: VERSION_ID, buildId: BUILD_ID, detach: true }],
+    ["neither buildId nor detach", { versionId: VERSION_ID }],
+  ])("rejects %s before any request", async (_label, args) => {
+    const fetchImpl = routed(versionBody(), buildBody());
+
+    const result = await callTool(args, fetchImpl);
+
+    expect(result.isError).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 

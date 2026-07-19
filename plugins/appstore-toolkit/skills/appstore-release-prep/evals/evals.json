@@ -1,0 +1,106 @@
+{
+  "skill_name": "appstore-release-prep",
+  "fixtures": {
+    "pixelwright": "Mature listing kept as a metadata tree: fastlane/metadata/en-US/ with name.txt, subtitle.txt, description.txt (3623/4000), promotional_text.txt and the three URL files, plus a fastlane/metadata/.listing.json sidecar carrying the localization ids and per-field baseline digests. keywords.txt and release_notes.txt are absent. One feature (batch export) shipped in the 2.0.0 build but was never written into the changelog. Em dashes in description prose. Screenshot config not documented. pbxproj says 2.1.0.",
+    "pixelwright-drifted": "Same tree as pixelwright, except the live App Store Connect listing has moved since export: promotional_text and subtitle were edited in the web UI, so their live values no longer match the baseline digests recorded in .listing.json. The local promotional_text.txt is also edited. Exercises the three-way merge.",
+    "harborlight": "No metadata tree. Store copy lives in a single APPSTORE.md whose description section contains its own '## Keywords' heading, so a naive section parser truncates the description and measures it short — it is actually 4180 chars, over the limit. pbxproj says 1.4.0.",
+    "tidepool": "No APPSTORE.md and no metadata tree. Only a changelog and git history. pbxproj says 1.2.0."
+  },
+  "evals": [
+    {
+      "id": 0,
+      "name": "full-prep-metadata-tree",
+      "fixture": "pixelwright",
+      "prompt": "ok pixelwright 2.1 is ready to go out, can you fill in the changelog and all the app store stuff so i can submit tomorrow",
+      "expected_output": "CHANGELOG gains a 2.1.0 entry covering smart crop, compare slider, parallel export and the ICC fix. The metadata tree gains release_notes.txt, keywords.txt and a rewritten subtitle.txt; description.txt stays under 4000, which requires cutting existing copy. Batch export is surfaced as shipped-but-never-announced. Em dashes reworded.",
+      "assertions": [
+        "CHANGELOG documents 2.1.0, read from MARKETING_VERSION rather than guessed from the change shape",
+        "The unannounced 2.0.0 feature (batch export) is surfaced, not silently dropped",
+        "Fields are written as individual files under fastlane/metadata/en-US/, not into a markdown doc",
+        "release_notes.txt created and within 4000 chars",
+        "keywords.txt created, within 100 chars, no space after commas",
+        "subtitle.txt within 30 chars",
+        "description.txt still within 4000 chars after the new feature is added",
+        "No file contains headings, character counts or commentary — copy only, since content ships verbatim",
+        "No em dashes in store prose (bullet-label separators exempt)",
+        "The tree passes the audit, and final character counts are reported back"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "appstore-only-ask",
+      "fixture": "pixelwright",
+      "prompt": "can you write the app store description and keywords for pixelwright 2.1? heads up the listing is already pretty long",
+      "expected_output": "Same as eval 0, but the user named only two fields. Tests whether the release is still handled coherently (changelog, other fields, the unannounced feature) rather than answering the literal question and leaving the submission half-prepared. The 'already pretty long' hint should force measuring before writing.",
+      "assertions": [
+        "CHANGELOG documents 2.1.0, read from MARKETING_VERSION rather than guessed from the change shape",
+        "The unannounced 2.0.0 feature (batch export) is surfaced, not silently dropped",
+        "Fields beyond the two named (release_notes, subtitle, promotional_text) are also filled",
+        "The current description length is measured before new copy is written, not after",
+        "description.txt still within 4000 chars",
+        "keywords.txt within 100 chars, no space after commas",
+        "subtitle.txt within 30 chars",
+        "release_notes.txt within 4000 chars",
+        "No em dashes in store prose (bullet-label separators exempt)",
+        "The tree passes the audit, and final character counts are reported back"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "round-trip-conflict",
+      "fixture": "pixelwright-drifted",
+      "prompt": "pull the latest listing, add the 2.1 release notes and push it back up",
+      "expected_output": "Export runs first. The dry-run apply reports promotional_text and subtitle as conflicts, since both were edited in App Store Connect after the export. The model reconciles by re-exporting and merging rather than forcing, and does not run the non-dry-run apply without asking.",
+      "assertions": [
+        "export_listing is called before any edits are written",
+        "The exported files are written to disk as returned, including .listing.json",
+        "apply_listing is called with dryRun first and the report is read before acting",
+        "Fields reported as conflict are identified as web-UI edits made since the export",
+        "force is NOT passed to work around the conflicts",
+        "The live-only copy is pulled back into the local files before new copy is layered on top",
+        "The user is asked before the non-dry-run apply — pushing is not done unilaterally",
+        "release_notes.txt is written and within 4000 chars",
+        "The user is told the tree and .listing.json need committing",
+        "Local-vs-live status is stated explicitly rather than reported as a bare 'done'"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "markdown-fallback-truncation",
+      "fixture": "harborlight",
+      "prompt": "harborlight 1.4 goes out friday, can you get the store copy updated",
+      "expected_output": "The audit falls back to APPSTORE.md. The description's embedded '## Keywords' heading must not be mistaken for a section boundary — the real description is 4180 chars and over the limit, so copy has to be cut rather than added to.",
+      "assertions": [
+        "The audit source is checked and reported as APPSTORE.md, not assumed to be a metadata tree",
+        "The description is measured at its true full length, not truncated at the embedded heading",
+        "The over-limit description is surfaced and cut, not extended",
+        "Existing live copy is edited rather than rewritten wholesale from scratch",
+        "CHANGELOG documents 1.4.0, read from MARKETING_VERSION",
+        "Sections are ordered as App Store Connect displays them, so the doc can be pasted top to bottom",
+        "KEYWORDS within 100 chars, no space after commas",
+        "SUBTITLE within 30 chars",
+        "No em dashes in store prose (bullet-label separators exempt)",
+        "APPSTORE.md passes the audit, and final character counts are reported back"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "no-store-metadata-yet",
+      "fixture": "tidepool",
+      "prompt": "im submitting tidepool 1.2 next week and ive never written any of the store metadata, theres only a changelog. can you sort it all out",
+      "expected_output": "Store metadata created from scratch with every App Store Connect field, each within limits. CHANGELOG gains a 1.2.0 entry covering tide alerts, solunar forecast, Watch complication, and the metric rounding fix.",
+      "assertions": [
+        "CHANGELOG documents 1.2.0, read from MARKETING_VERSION rather than guessed from the change shape",
+        "The absence of store metadata is confirmed as genuine rather than a mis-pointed audit",
+        "Every field is written, not only the headline ones",
+        "DESCRIPTION present and within 4000 chars",
+        "WHAT'S NEW present and within 4000 chars",
+        "PROMOTIONAL TEXT present and within 170 chars",
+        "KEYWORDS present, within 100 chars, no space after commas",
+        "SUBTITLE present and within 30 chars",
+        "No em dashes in store prose (bullet-label separators exempt)",
+        "The result passes the audit, and final character counts are reported back"
+      ]
+    }
+  ]
+}

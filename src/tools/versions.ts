@@ -19,6 +19,120 @@ const localizationIdArg = z
     "The appStoreVersionLocalization id (from app_store_connect_list_version_localizations).",
   );
 
+/** Apple only accepts a build change while the version is still editable. */
+const EDITABLE_STATES = ["PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED"];
+
+type Rec = Record<string, unknown>;
+
+const isRecord = (value: unknown): value is Rec =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const resource = (response: unknown): Rec =>
+  isRecord(response) && isRecord(response.data) ? response.data : {};
+
+const attributes = (res: Rec): Rec => (isRecord(res.attributes) ? res.attributes : {});
+
+/** The id on the far side of a to-one relationship, e.g. which app a build belongs to. */
+const relatedId = (res: Rec, name: string): string | undefined => {
+  const rels = isRecord(res.relationships) ? res.relationships : {};
+  const rel = isRecord(rels[name]) ? (rels[name] as Rec) : {};
+  return isRecord(rel.data) && typeof rel.data.id === "string" ? rel.data.id : undefined;
+};
+
+/** Pull a sideloaded resource out of the top-level `included` array. */
+const included = (response: unknown, type: string): Rec | undefined => {
+  if (!isRecord(response) || !Array.isArray(response.included)) return undefined;
+  return response.included.find((item) => isRecord(item) && item.type === type) as Rec | undefined;
+};
+
+class PreconditionError extends Error {
+  override readonly name = "PreconditionError";
+  constructor(
+    message: string,
+    readonly details: Rec,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Apple answers a bad build attach with a bare 409 that names no cause, so we
+ * read both resources first and report every failing precondition at once.
+ * Returning them together means a caller with two problems learns both in one
+ * round trip instead of playing whack-a-mole.
+ */
+const assertAttachable = (versionResponse: unknown, buildResponse: unknown): void => {
+  const version = resource(versionResponse);
+  const build = resource(buildResponse);
+  const versionAttrs = attributes(version);
+  const buildAttrs = attributes(build);
+  const preRelease = attributes(included(buildResponse, "preReleaseVersions") ?? {});
+
+  const appStoreState = versionAttrs.appStoreState;
+  const versionString = versionAttrs.versionString;
+  const processingState = buildAttrs.processingState;
+  const buildVersionString = preRelease.version;
+
+  const problems: string[] = [];
+
+  if (typeof appStoreState === "string" && !EDITABLE_STATES.includes(appStoreState)) {
+    problems.push(
+      `the version is ${appStoreState}; a build can only be changed while it is ` +
+        `${EDITABLE_STATES.join(" or ")}`,
+    );
+  }
+
+  const versionAppId = relatedId(version, "app");
+  const buildAppId = relatedId(build, "app");
+  if (versionAppId !== undefined && buildAppId !== undefined && versionAppId !== buildAppId) {
+    problems.push(
+      `the build belongs to app ${buildAppId}, but the version belongs to ${versionAppId}`,
+    );
+  }
+
+  if (
+    typeof versionAttrs.platform === "string" &&
+    typeof preRelease.platform === "string" &&
+    versionAttrs.platform !== preRelease.platform
+  ) {
+    problems.push(
+      `the build is ${String(preRelease.platform)}, but the version is ${String(versionAttrs.platform)}`,
+    );
+  }
+
+  if (typeof processingState === "string" && processingState !== "VALID") {
+    problems.push(
+      processingState === "PROCESSING"
+        ? "the build is still PROCESSING; wait for it to reach VALID and retry"
+        : `the build is ${processingState}, not VALID; upload a new build`,
+    );
+  }
+
+  if (buildAttrs.expired === true) {
+    problems.push("the build has expired and can no longer be attached");
+  }
+
+  if (
+    typeof buildVersionString === "string" &&
+    typeof versionString === "string" &&
+    buildVersionString !== versionString
+  ) {
+    problems.push(
+      `the build is for version ${buildVersionString}, but the App Store version is ${versionString}`,
+    );
+  }
+
+  if (problems.length === 0) return;
+
+  throw new PreconditionError(`Cannot attach this build: ${problems.join("; ")}.`, {
+    appStoreState,
+    versionString,
+    processingState,
+    expired: buildAttrs.expired,
+    buildVersionString,
+  });
+};
+
 export const registerVersionTools = (
   server: McpServer,
   client: AppStoreConnectClient,
@@ -151,17 +265,79 @@ export const registerVersionTools = (
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
-    async ({ localizationId, ...attributes }) =>
+    async ({ localizationId, ...attrs }) =>
       wrap(async () =>
         summarizeResponse(
           await client.patch(`/v1/appStoreVersionLocalizations/${localizationId}`, {
             data: {
               type: "appStoreVersionLocalizations",
               id: localizationId,
-              attributes: compact(attributes),
+              attributes: compact(attrs),
             },
           }),
         ),
       ),
+  );
+
+  server.registerTool(
+    "app_store_connect_set_version_build",
+    {
+      description:
+        "Attach a build to an App Store version — the last step before submitting. Pass detach: " +
+        "true instead of a buildId to remove the currently attached build. The version must be " +
+        "PREPARE_FOR_SUBMISSION or DEVELOPER_REJECTED, and the build must be VALID, unexpired, " +
+        "and belong to the same app and version string.",
+      inputSchema: {
+        versionId: versionIdArg,
+        buildId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "The build id (from app_store_connect_list_builds). Required unless detach is true.",
+          ),
+        detach: z
+          .boolean()
+          .optional()
+          .describe("Remove the currently attached build instead of setting one. Omit buildId."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ versionId, buildId, detach }) =>
+      wrap(async () => {
+        // A flat input schema can't express "exactly one of", so enforce it here.
+        if (detach === true && buildId !== undefined) {
+          throw new Error("Pass either buildId or detach, not both.");
+        }
+        if (detach !== true && buildId === undefined) {
+          throw new Error(
+            "Pass buildId to attach a build, or detach: true to remove the current one.",
+          );
+        }
+
+        const version = await client.get(`/v1/appStoreVersions/${versionId}`);
+        if (buildId === undefined) {
+          // Nothing to validate about a build we're removing — only that the
+          // version still accepts the change.
+          assertAttachable(version, {});
+        } else {
+          assertAttachable(
+            version,
+            await client.get(`/v1/builds/${buildId}`, { include: "preReleaseVersion" }),
+          );
+        }
+
+        return summarizeResponse(
+          await client.patch(`/v1/appStoreVersions/${versionId}`, {
+            data: {
+              id: versionId,
+              type: "appStoreVersions",
+              relationships: {
+                build: { data: buildId === undefined ? null : { id: buildId, type: "builds" } },
+              },
+            },
+          }),
+        );
+      }),
   );
 };

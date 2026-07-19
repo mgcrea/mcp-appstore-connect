@@ -6,6 +6,7 @@ dist
 *.p8
 .DS_Store
 coverage
+__pycache__/
 .idea
 .mcp.json
 .reference
