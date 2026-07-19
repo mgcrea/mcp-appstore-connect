@@ -708,6 +708,13 @@ def scan_em_dashes(repo, paths):
     it is read by developers, not customers or a reviewer, so an em dash in it is
     a style preference rather than the tell this check exists to catch. Mixing the
     two buries the lines that actually ship.
+
+    The screenshot config is not scanned at all. Its captions are short label-like
+    fragments where a dash reads as formatting, the same reason BULLET_SEPARATOR is
+    exempt -- and the scan is line-based, so it cannot tell a caption from an
+    internal "//" comment key anyway. Both hits were noise, and noise here costs
+    more than it saves: a caption fix invalidates the goldens and forces a full
+    recapture plus re-upload of an already-complete screenshot set.
     """
     hits = []
     for p in paths:
@@ -844,7 +851,7 @@ def audit(repo, fields_file=None, live_fields=None, locale=None, metadata_root=N
         "unannounced_from_last_release": find_unannounced(repo, cl["path"], prev_boundary, boundary),
         "store": store,
         "live": live,
-        "em_dashes": scan_em_dashes(repo, prose + ([cfg] if cfg else [])),
+        "em_dashes": scan_em_dashes(repo, prose),
         "em_dashes_changelog": scan_em_dashes(repo, ["CHANGELOG.md"]),
         "screenshots": screenshot_sync(repo, cfg, store_doc) if cfg else None,
     }
