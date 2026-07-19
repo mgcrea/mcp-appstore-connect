@@ -32,6 +32,12 @@ export const firstIncluded = (response: unknown, type: string): Rec | undefined 
   return response.included.find((item) => isRecord(item) && item.type === type) as Rec | undefined;
 };
 
+/** Every sideloaded resource of a type, for the to-many side of an `include`. */
+export const includedOf = (response: unknown, type: string): Rec[] => {
+  if (!isRecord(response) || !Array.isArray(response.included)) return [];
+  return response.included.filter((item): item is Rec => isRecord(item) && item.type === type);
+};
+
 export type Resource = {
   type?: unknown;
   id?: unknown;

@@ -115,6 +115,7 @@ describe("tool registration", () => {
       "app_store_connect_reorder_screenshots",
       "app_store_connect_invite_beta_tester",
       "app_store_connect_remove_tester_from_group",
+      "app_store_connect_set_in_app_purchase_price",
       "app_store_connect_create_bundle_id",
       "app_store_connect_enable_capability",
       "app_store_connect_disable_capability",
@@ -465,6 +466,228 @@ describe("update_version", () => {
       versionString: "1.9.0",
       releaseType: "MANUAL",
     });
+  });
+});
+
+describe("in-app purchase pricing", () => {
+  const IAP_ID = "6f4d2c1a-0000-4000-8000-000000000001";
+  const PRICE_POINT_ID = "eyJzIjoiNjc0NCIsInQiOiJVU0EiLCJwIjoiMTAwMDgifQ";
+
+  const pricePointsBody = (): unknown => ({
+    data: [
+      {
+        id: PRICE_POINT_ID,
+        type: "inAppPurchasePricePoints",
+        attributes: { customerPrice: "4.99", proceeds: "3.49" },
+      },
+      {
+        id: "other-point",
+        type: "inAppPurchasePricePoints",
+        attributes: { customerPrice: "9.99", proceeds: "6.99" },
+      },
+    ],
+  });
+
+  /** Price-point lookups are the preflight; the POST is the schedule create. */
+  const routed = (points: unknown = pricePointsBody()): ReturnType<typeof vi.fn> =>
+    vi.fn(async (url: string) => {
+      if (String(url).includes("/pricePoints")) return jsonResponse(points);
+      return jsonResponse({ data: { id: "sched-1", type: "inAppPurchasePriceSchedules" } });
+    });
+
+  const callTool = async (
+    name: string,
+    args: Record<string, unknown>,
+    fetchImpl: ReturnType<typeof vi.fn>,
+  ): ReturnType<Client["callTool"]> => {
+    const client = await connect(
+      { ...baseConfig, allowWrites: true },
+      fetchImpl as unknown as typeof fetch,
+    );
+    return client.callTool({ name, arguments: args });
+  };
+
+  it("builds the inline-create schedule and echoes the price it set", async () => {
+    const fetchImpl = routed();
+
+    const result = await callTool(
+      "app_store_connect_set_in_app_purchase_price",
+      {
+        inAppPurchaseId: IAP_ID,
+        pricePointId: PRICE_POINT_ID,
+        baseTerritory: "USA",
+        confirm: true,
+      },
+      fetchImpl,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const post = postCall(fetchImpl, "/v1/inAppPurchasePriceSchedules");
+    const body = JSON.parse(String(post?.[1].body));
+
+    // The placeholder in manualPrices must match the included price's id, or
+    // Apple resolves the relationship to nothing.
+    const placeholder = body.data.relationships.manualPrices.data[0].id;
+    expect(body.included[0].id).toBe(placeholder);
+    expect(body.data.relationships.inAppPurchase.data).toEqual({
+      type: "inAppPurchases",
+      id: IAP_ID,
+    });
+    expect(body.data.relationships.baseTerritory.data).toEqual({
+      type: "territories",
+      id: "USA",
+    });
+    expect(body.included[0].relationships.inAppPurchasePricePoint.data).toEqual({
+      type: "inAppPurchasePricePoints",
+      id: PRICE_POINT_ID,
+    });
+    // startDate omitted means "now" — it must not be sent as null.
+    expect(body.included[0].attributes).toEqual({});
+
+    const text = (result.content as { text: string }[])[0]?.text ?? "";
+    expect(JSON.parse(text).priced).toEqual({
+      pricePointId: PRICE_POINT_ID,
+      baseTerritory: "USA",
+      customerPrice: "4.99",
+      proceeds: "3.49",
+      startDate: "immediate",
+    });
+  });
+
+  it("passes start and end dates through as attributes", async () => {
+    const fetchImpl = routed();
+
+    await callTool(
+      "app_store_connect_set_in_app_purchase_price",
+      {
+        inAppPurchaseId: IAP_ID,
+        pricePointId: PRICE_POINT_ID,
+        baseTerritory: "USA",
+        startDate: "2026-09-01",
+        endDate: "2026-12-31",
+        confirm: true,
+      },
+      fetchImpl,
+    );
+
+    const body = JSON.parse(
+      String(postCall(fetchImpl, "/v1/inAppPurchasePriceSchedules")?.[1].body),
+    );
+    expect(body.included[0].attributes).toEqual({
+      startDate: "2026-09-01",
+      endDate: "2026-12-31",
+    });
+  });
+
+  it("refuses a price point from another territory without pricing anything", async () => {
+    // The IAP's USA catalogue simply does not contain the requested id.
+    const fetchImpl = routed({ data: [] });
+
+    const result = await callTool(
+      "app_store_connect_set_in_app_purchase_price",
+      {
+        inAppPurchaseId: IAP_ID,
+        pricePointId: PRICE_POINT_ID,
+        baseTerritory: "USA",
+        confirm: true,
+      },
+      fetchImpl,
+    );
+
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0]?.text ?? "").toContain(PRICE_POINT_ID);
+    expect(postCall(fetchImpl, "/v1/inAppPurchasePriceSchedules")).toBeUndefined();
+  });
+
+  it("requires confirm before changing a price", async () => {
+    const fetchImpl = routed();
+
+    const result = await callTool(
+      "app_store_connect_set_in_app_purchase_price",
+      { inAppPurchaseId: IAP_ID, pricePointId: PRICE_POINT_ID, baseTerritory: "USA" },
+      fetchImpl,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("filters price points by territory", async () => {
+    const fetchImpl = routed();
+
+    const result = await callTool(
+      "app_store_connect_list_iap_price_points",
+      { inAppPurchaseId: IAP_ID, territory: "FRA" },
+      fetchImpl,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const url = new URL(String(callArgs(fetchImpl)[0]));
+    expect(url.pathname).toBe(`/v2/inAppPurchases/${IAP_ID}/pricePoints`);
+    expect(url.searchParams.get("filter[territory]")).toBe("FRA");
+  });
+
+  it("flattens the price schedule's sideloaded prices", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        data: {
+          id: "sched-1",
+          type: "inAppPurchasePriceSchedules",
+          relationships: { baseTerritory: { data: { id: "USA", type: "territories" } } },
+        },
+        included: [
+          {
+            id: "price-1",
+            type: "inAppPurchasePrices",
+            attributes: { startDate: "2026-09-01", endDate: null, manual: true },
+            relationships: {
+              territory: { data: { id: "USA", type: "territories" } },
+              inAppPurchasePricePoint: {
+                data: { id: PRICE_POINT_ID, type: "inAppPurchasePricePoints" },
+              },
+            },
+          },
+          { id: "USA", type: "territories", attributes: { currency: "USD" } },
+        ],
+      }),
+    );
+
+    const result = await callTool(
+      "app_store_connect_get_iap_price_schedule",
+      { inAppPurchaseId: IAP_ID },
+      fetchImpl,
+    );
+
+    expect(JSON.parse((result.content as { text: string }[])[0]?.text ?? "{}")).toEqual({
+      scheduleId: "sched-1",
+      baseTerritory: "USA",
+      manualPrices: [
+        {
+          id: "price-1",
+          startDate: "2026-09-01",
+          endDate: null,
+          manual: true,
+          territory: "USA",
+          pricePointId: PRICE_POINT_ID,
+        },
+      ],
+    });
+  });
+
+  it("reports an unpriced IAP as an empty price list", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ data: { id: "sched-1", type: "inAppPurchasePriceSchedules" } }),
+    );
+
+    const result = await callTool(
+      "app_store_connect_get_iap_price_schedule",
+      { inAppPurchaseId: IAP_ID },
+      fetchImpl,
+    );
+
+    expect(
+      JSON.parse((result.content as { text: string }[])[0]?.text ?? "{}").manualPrices,
+    ).toEqual([]);
   });
 });
 
