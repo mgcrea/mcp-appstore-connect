@@ -154,7 +154,27 @@ Tests run entirely offline: JWT signing is verified against a throwaway P-256 ke
 
 ### Publish
 
-Options A (npx) and B (Docker) resolve only once a release is out: pushing to `main` or a `v*.*.*` tag triggers CI to build and push the image to `ghcr.io/mgcrea/mcp-appstore-connect`, and `npm publish` (which runs `pnpm build` via `prepublishOnly`) ships the package. Until then, use Option C from source.
+Options A (npx) and B (Docker) resolve only once a release is out. Pushing a `v*.*.*` tag triggers CI to:
+
+- publish to npm via [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) (OIDC — no `NPM_TOKEN` stored anywhere) with a [provenance attestation](https://docs.npmjs.com/generating-provenance-statements), and
+- build, sign, and push the multi-arch image to `ghcr.io/mgcrea/mcp-appstore-connect`, with build provenance, an SBOM, and a [cosign](https://github.com/sigstore/cosign) keyless signature.
+
+Both artifacts are cryptographically traceable back to the exact commit and CI run that produced them — see **Verify** below. Until a release exists, use Option C from source.
+
+### Verify
+
+Before trusting an artifact from Option A or B, you can check it was actually built by this repo's CI rather than published from someone's laptop:
+
+```sh
+# npm — provenance attestation (also shown as a badge on the npmjs.com package page)
+npm audit signatures
+
+# Docker — cosign keyless signature, tied to this repo's GitHub Actions identity
+cosign verify \
+  --certificate-identity-regexp 'https://github.com/mgcrea/mcp-appstore-connect/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/mgcrea/mcp-appstore-connect:latest
+```
 
 ## License
 
