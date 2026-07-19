@@ -144,11 +144,15 @@ const applyCall = async (
   client: Client,
   args: Record<string, unknown>,
   files: { path: string; content: string }[],
+  baselineOverrides: Record<string, string> = {},
 ): Promise<unknown> =>
   client.callTool({
     name: "app_store_connect_apply_listing",
     arguments: {
-      files: [{ path: "fastlane/metadata/.listing.json", content: sidecar() }, ...files],
+      files: [
+        { path: "fastlane/metadata/.listing.json", content: sidecar(baselineOverrides) },
+        ...files,
+      ],
       ...args,
     },
   });
@@ -444,6 +448,62 @@ describe("apply_listing", () => {
       1,
     );
     expect(writeCalls(fetchImpl)).toHaveLength(0);
+  });
+
+  it("blocks an empty file from clearing live copy", async () => {
+    const fetchImpl = routes(exportRoutes());
+    const client = await connect(fetchImpl);
+    const result = await applyCall(client, { dryRun: false, confirm: true }, [
+      { path: "fastlane/metadata/en-US/description.txt", content: "" },
+    ]);
+    const payload = JSON.parse(text(result)) as {
+      summary: { blocked: number };
+      changes: { action: string; reason?: string }[];
+    };
+
+    expect(payload.summary.blocked).toBe(1);
+    expect(payload.changes[0]?.reason).toContain("allowClear: true");
+    expect(writeCalls(fetchImpl)).toHaveLength(0);
+  });
+
+  it("clears the field when allowClear is set", async () => {
+    const fetchImpl = routes(exportRoutes());
+    const client = await connect(fetchImpl);
+    await applyCall(client, { dryRun: false, confirm: true, allowClear: true }, [
+      { path: "fastlane/metadata/en-US/description.txt", content: "" },
+    ]);
+
+    const writes = writeCalls(fetchImpl);
+    expect(writes).toHaveLength(1);
+    expect(JSON.parse(writes[0]![1].body as string).data.attributes).toEqual({ description: "" });
+  });
+
+  it("does not block a field that is already empty upstream", async () => {
+    const fetchImpl = routes(
+      exportRoutes({
+        "/appStoreVersionLocalizations": {
+          data: [
+            resource("vloc-en", "appStoreVersionLocalizations", {
+              locale: "en-US",
+              description: "",
+            }),
+          ],
+        },
+      }),
+    );
+    const client = await connect(fetchImpl);
+    // The baseline agrees the field was already empty at export, so this is a
+    // genuine no-op rather than an upstream change.
+    const result = await applyCall(
+      client,
+      { dryRun: true },
+      [{ path: "fastlane/metadata/en-US/description.txt", content: "" }],
+      { description: digest("") },
+    );
+
+    const payload = JSON.parse(text(result)) as { summary: { blocked: number; unchanged: number } };
+    expect(payload.summary.blocked).toBe(0);
+    expect(payload.summary.unchanged).toBe(1);
   });
 
   it("rejects a manifest with no sidecar", async () => {

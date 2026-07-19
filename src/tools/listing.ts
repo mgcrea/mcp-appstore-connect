@@ -109,7 +109,8 @@ export const registerListingTools = (
         "Push an edited App Store listing back to App Store Connect. Pass the metadata files you " +
         `changed plus ${SIDECAR_PATH}. Runs as a dry run by default: review the reported changes, ` +
         "then re-run with dryRun: false and confirm: true. Fields changed in App Store Connect " +
-        "since the export are reported as conflicts and skipped unless you pass force.",
+        "since the export are reported as conflicts and skipped unless you pass force. An empty " +
+        "file clears a field, but only with allowClear: true.",
       inputSchema: {
         files: z
           .array(
@@ -140,6 +141,13 @@ export const registerListingTools = (
           .boolean()
           .default(false)
           .describe("Apply even where the listing changed upstream since export, overwriting it."),
+        allowClear: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Allow an empty file to clear a field that currently has copy in App Store Connect. " +
+              "Off by default so a truncated file cannot wipe live copy by accident.",
+          ),
         createMissingLocales: z
           .boolean()
           .default(false)
@@ -150,7 +158,7 @@ export const registerListingTools = (
     },
     // `confirm` is a plain boolean rather than the usual confirmArg (z.literal(true))
     // because the dry run has to be callable without it; the handler enforces the rule.
-    async ({ files, dryRun, confirm, force, createMissingLocales, locales }) =>
+    async ({ files, dryRun, confirm, force, allowClear, createMissingLocales, locales }) =>
       wrapResult(async () => {
         if (!dryRun && !confirm) {
           return fail(
@@ -170,6 +178,7 @@ export const registerListingTools = (
         const result = await applyListing(client, manifest, {
           dryRun,
           force,
+          allowClear,
           createMissingLocales,
           ...(locales !== undefined ? { locales } : {}),
         });

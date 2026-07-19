@@ -185,7 +185,9 @@ apply_listing  { files: [...], dryRun: false, confirm: true }
 - Those digests make apply a three-way merge. A field edited in App Store Connect's web UI
   since your export is reported as a **conflict** and skipped, rather than silently
   overwritten; re-export and merge, or pass `force: true`.
-- **An empty file clears a field; an absent file leaves it alone.**
+- **An absent file leaves a field alone; an empty file clears it** — but clearing needs
+  `allowClear: true`, so a file truncated by accident is reported as `blocked` rather than
+  wiping live copy.
 - Any field over Apple's limit aborts the whole apply before the first write — a
   half-applied listing is worse than an untouched one.
 - `format: "review"` renders a read-only markdown summary with character counts, for when

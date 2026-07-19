@@ -13,7 +13,13 @@ import {
 import { fetchLocalizations } from "./fetch.js";
 import type { ParsedManifest } from "./manifest.js";
 
-export type ChangeAction = "change" | "unchanged" | "converged" | "conflict" | "skipped";
+export type ChangeAction =
+  | "change"
+  | "unchanged"
+  | "converged"
+  | "conflict"
+  | "blocked"
+  | "skipped";
 
 export type PlannedChange = {
   locale: string;
@@ -42,6 +48,7 @@ export type Rejection = {
 export type ApplyOptions = {
   dryRun: boolean;
   force: boolean;
+  allowClear: boolean;
   createMissingLocales: boolean;
   locales?: string[] | undefined;
 };
@@ -59,6 +66,7 @@ export type ApplyResult =
         unchanged: number;
         converged: number;
         conflicts: number;
+        blocked: number;
         skipped: number;
         localesCreated: number;
       };
@@ -85,6 +93,7 @@ export const classify = (
   live: string | undefined,
   baseline: string | undefined,
   force: boolean,
+  allowClear: boolean,
 ): { action: ChangeAction; reason?: string } => {
   if (live === undefined) {
     return {
@@ -105,6 +114,17 @@ export const classify = (
       reason:
         "Changed in App Store Connect since this listing was exported. Re-export and merge, " +
         "or pass force: true to overwrite the upstream edit.",
+    };
+  }
+  // An empty file is how the tree says "clear this field", but it is also what an
+  // editor leaves behind when a file gets truncated by accident. Wiping live copy
+  // is not something to infer from an absence, so it takes an explicit opt-in.
+  if (local === "" && !allowClear) {
+    return {
+      action: "blocked",
+      reason:
+        "The file is empty, which would clear this field in App Store Connect. Delete the file " +
+        "instead to leave the field alone, or pass allowClear: true if you really mean to clear it.",
     };
   }
   return { action: "change" };
@@ -157,7 +177,13 @@ export const applyListing = async (
 
       const { action, reason } = isNew
         ? { action: "change" as ChangeAction, reason: undefined }
-        : classify(local, liveFields?.[field], sidecar.baseline[locale]?.[field], opts.force);
+        : classify(
+            local,
+            liveFields?.[field],
+            sidecar.baseline[locale]?.[field],
+            opts.force,
+            opts.allowClear,
+          );
 
       if (action === "change") {
         const breach = overLimit(field, local);
@@ -187,6 +213,7 @@ export const applyListing = async (
     unchanged: changes.filter((c) => c.action === "unchanged").length,
     converged: changes.filter((c) => c.action === "converged").length,
     conflicts: changes.filter((c) => c.action === "conflict").length,
+    blocked: changes.filter((c) => c.action === "blocked").length,
     skipped: changes.filter((c) => c.action === "skipped").length,
     localesCreated: opts.dryRun ? newLocales.length : 0,
   };
