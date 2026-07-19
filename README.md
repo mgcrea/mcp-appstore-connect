@@ -75,6 +75,7 @@ Create a key in App Store Connect → **Users and Access → Integrations → Ke
 | `APP_STORE_CONNECT_VENDOR_NUMBER` | reports  | Needed only by the sales/finance report tools.                 |
 | `APP_STORE_CONNECT_ALLOW_WRITES`  | no       | `1` to register the write tools. Off by default.               |
 | `APP_STORE_CONNECT_MAX_RETRIES`   | no       | Retry budget for 401/429/5xx. Defaults to 3.                   |
+| `APP_STORE_CONNECT_METADATA_ROOT` | no       | Where the listing tree lives. Defaults to `fastlane/metadata`. |
 | `APP_STORE_CONNECT_DEBUG`         | no       | `1` to log to stderr.                                          |
 
 See [.env.example](./.env.example) for the annotated list.
@@ -103,6 +104,7 @@ With this in place an MCP client needs no `env` block at all — just `npx -y @m
 
 - **The environment wins, field by field.** A config file supplies whatever the environment doesn't, so Docker and CI keep working exactly as before, and a one-off `APP_STORE_CONNECT_ALLOW_WRITES=0` still overrides a file that says `true`.
 - Keys are camelCase (`keyId`, not `APP_STORE_CONNECT_KEY_ID`), `~` is expanded in `p8Path`, and `p8` takes an inline PEM as the alternative to `p8Path`.
+- `metadataRoot` sets where this machine's repos keep their listing tree — useful if you prefer `"AppStore"` to the fastlane default. It must be repo-relative; use `"."` for the repo root.
 - **Unknown keys are an error**, not ignored — a typo'd `keyID` tells you so instead of silently falling back to the environment.
 - Location: `$APP_STORE_CONNECT_CONFIG`, else `$XDG_CONFIG_HOME/appstore-connect/config.json`, else `~/.config/appstore-connect/config.json`. An absent file is fine; a malformed one is reported with its path.
 - The server warns on stderr if the file is readable by other users.
@@ -244,6 +246,13 @@ file per field means the file content _is_ the value, byte for byte — a descri
 containing `## Keywords`, a `---` rule or a fenced code block is just text, and `git
 diff` shows you the field that changed rather than a line number in a wall of copy.
 
+**The location is a default, not a requirement.** Keep the tree wherever you like — set
+`APP_STORE_CONNECT_METADATA_ROOT` (or `metadataRoot` in the config file) to change it for
+every repo on the machine, or pass `metadataRoot` to a single `export_listing` call. The
+fastlane path is the default only because it's the one other tools already read.
+`apply_listing` needs no such setting: it finds the tree from wherever you pass
+`.listing.json`, so a tree you move later keeps working.
+
 The server never writes to disk: `export_listing` hands back `{path, content}` pairs and
 your agent writes them, so every write stays under your own permission prompt and nothing
 depends on host paths being visible inside Docker.
@@ -260,7 +269,9 @@ apply_listing  { files: [...], dryRun: false, confirm: true }
 - `version` accepts `"latest"` (the one you're preparing), `"live"` (on sale) or an exact
   `"1.4.0"`. Versions are ordered numerically, so `1.10.0` beats `1.9.0`.
 - Pass **only the files you changed**, plus `.listing.json` — it carries the localization
-  ids and the per-field digests recorded at export.
+  ids and the per-field digests recorded at export, and its directory is what tells the
+  server where the tree lives. Every file you pass must sit under that same directory;
+  mixing two trees is an error rather than a silent push against the wrong ids.
 - Those digests make apply a three-way merge. A field edited in App Store Connect's web UI
   since your export is reported as a **conflict** and skipped, rather than silently
   overwritten; re-export and merge, or pass `force: true`.
@@ -271,7 +282,7 @@ apply_listing  { files: [...], dryRun: false, confirm: true }
   half-applied listing is worse than an untouched one.
 - `format: "review"` renders a read-only markdown summary with character counts, for when
   you just want to read the listing. Nothing parses it back.
-- If `fastlane/metadata/` already exists, diff before overwriting it.
+- If the metadata tree already exists, diff before overwriting it.
 
 ## Release-prep plugin
 
