@@ -5,7 +5,9 @@ Answers the questions you cannot reliably eyeball:
   - What version are we shipping, and where is the boundary of the last release?
   - Which commits land in this release, and which shipped in the LAST one but
     were never announced?
-  - Does every App Store Connect field fit inside Apple's character limits?
+  - Does every App Store Connect field, in every locale, fit inside Apple's
+    character limits?
+  - Which fields have been edited since the last export, and therefore need pushing?
   - Where is the store copy still carrying em dashes?
   - Has the screenshot config drifted from the copy that documents it?
 
@@ -14,6 +16,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -21,16 +24,34 @@ import subprocess
 import sys
 
 # Apple's App Store Connect limits. Spaces count toward every one of these.
+# Kept deliberately in lockstep with FIELD_LIMITS in src/listing/document.ts:
+# apply_listing aborts the WHOLE apply if any field busts a limit, so an audit
+# that measures a smaller set than the server enforces reports "clean" and then
+# watches the push refuse everything.
 FIELD_LIMITS = {
+    "NAME": 30,
     "SUBTITLE": 30,
     "PROMOTIONAL TEXT": 170,
     "KEYWORDS": 100,
     "DESCRIPTION": 4000,
     "WHAT'S NEW": 4000,
+    "MARKETING URL": 255,
+    "SUPPORT URL": 255,
+    "PRIVACY URL": 255,
 }
+
+# Fields whose absence is objectively broken and should fail the exit code.
+# Everything else is legitimately optional: promotional text is a nice-to-have,
+# the URLs are often unset, and an absent file means "leave this field alone"
+# rather than "nobody wrote it" (see manifest.ts). WHAT'S NEW is required too,
+# but only once there is a previous release -- Apple rejects release notes on a
+# first version, so audit() drops it from this set for a 1.0.
+REQUIRED_FIELDS = {"DESCRIPTION", "KEYWORDS", "SUBTITLE", "WHAT'S NEW"}
 
 # Header aliases -> canonical field name.
 FIELD_ALIASES = {
+    "NAME": "NAME",
+    "APP NAME": "NAME",
     "SUBTITLE": "SUBTITLE",
     "PROMOTIONAL TEXT": "PROMOTIONAL TEXT",
     "PROMO TEXT": "PROMOTIONAL TEXT",
@@ -40,7 +61,27 @@ FIELD_ALIASES = {
     "WHATS NEW": "WHAT'S NEW",
     "WHAT'S NEW IN THIS VERSION": "WHAT'S NEW",
     "RELEASE NOTES": "WHAT'S NEW",
+    "MARKETING URL": "MARKETING URL",
+    "SUPPORT URL": "SUPPORT URL",
+    "PRIVACY URL": "PRIVACY URL",
+    "PRIVACY POLICY URL": "PRIVACY URL",
 }
+
+
+def char_count(s):
+    """Count the way Apple counts: UTF-16 code units, not code points.
+
+    An emoji is 2 and a CJK character is 1. Python's len() would call that emoji
+    1, so a description measured here at 3,999/4,000 can be rejected by App Store
+    Connect at 4,001 -- the audit passing is exactly when nobody re-checks. This
+    mirrors charCount() in src/listing/document.ts, which is String.length.
+    """
+    return len(s.encode("utf-16-le")) // 2
+
+
+def digest(s):
+    """Mirror of digest() in src/listing/document.ts -- change detection, not crypto."""
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:8]
 
 STOPWORDS = {
     "with", "from", "into", "that", "this", "when", "adds", "add", "and", "the",
@@ -85,14 +126,19 @@ def read_versions(repo):
     if not pbx:
         return {"pbxproj": None, "marketing_version": None, "build": None}
     text = open(pbx, encoding="utf-8", errors="replace").read()
-    # The app target's version is the first one; test targets often pin 1.0.
+    # The app target's version is usually the first one, but pbxproj ordering is
+    # not guaranteed and test targets often pin 1.0. Taking [0] silently is how
+    # you document a release under a test target's version number, so when the
+    # file disagrees with itself, say so and let a human pick.
     mv = re.findall(r"MARKETING_VERSION\s*=\s*([^;]+);", text)
     bn = re.findall(r"CURRENT_PROJECT_VERSION\s*=\s*([^;]+);", text)
+    distinct = sorted(set(v.strip() for v in mv))
     return {
         "pbxproj": os.path.relpath(pbx, repo),
         "marketing_version": mv[0].strip() if mv else None,
         "build": bn[0].strip() if bn else None,
-        "all_marketing_versions": sorted(set(v.strip() for v in mv)),
+        "all_marketing_versions": distinct,
+        "ambiguous_version": len(distinct) > 1,
     }
 
 
@@ -207,45 +253,80 @@ STORE_DOC_CANDIDATES = (
 
 
 METADATA_ROOT = "fastlane/metadata"
+SIDECAR = f"{METADATA_ROOT}/.listing.json"
 
 # fastlane deliver's filenames -> this script's canonical field names. The
 # appstore-connect MCP's export_listing writes exactly this tree, so an exported
-# listing audits with no conversion step in between.
+# listing audits with no conversion step in between. Mirrors FILE_MAP in
+# src/listing/document.ts.
 METADATA_FILE_FIELDS = {
+    "name.txt": "NAME",
     "subtitle.txt": "SUBTITLE",
     "promotional_text.txt": "PROMOTIONAL TEXT",
     "keywords.txt": "KEYWORDS",
     "description.txt": "DESCRIPTION",
     "release_notes.txt": "WHAT'S NEW",
+    "marketing_url.txt": "MARKETING URL",
+    "support_url.txt": "SUPPORT URL",
+    "privacy_url.txt": "PRIVACY URL",
 }
 
+# Canonical name -> the key the sidecar's `baseline` uses, so a local file can be
+# compared against the digest recorded at export.
+SIDECAR_FIELD_KEYS = {
+    "NAME": "name",
+    "SUBTITLE": "subtitle",
+    "PROMOTIONAL TEXT": "promotionalText",
+    "KEYWORDS": "keywords",
+    "DESCRIPTION": "description",
+    "WHAT'S NEW": "whatsNew",
+    "MARKETING URL": "marketingUrl",
+    "SUPPORT URL": "supportUrl",
+    "PRIVACY URL": "privacyPolicyUrl",
+}
 
-def find_metadata_locale(repo, override=None):
-    """Which locale directory to audit: explicit, else the sidecar's primary, else en-US."""
+# Fields that PATCH to the appInfo resource rather than the version. They are not
+# scoped to a version at all, so version state does not protect them.
+APPINFO_FIELDS = {"NAME", "SUBTITLE", "PRIVACY URL"}
+
+
+def read_sidecar(repo):
+    """The export's record of what was live: ids, version state, per-field digests."""
+    full = os.path.join(repo, SIDECAR)
+    if not os.path.exists(full):
+        return None
+    try:
+        with open(full, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (ValueError, OSError):
+        return None  # a broken sidecar should not stop the audit
+
+
+def find_metadata_locales(repo, override=None):
+    """Every locale directory under the metadata root, primary first.
+
+    Auditing only one locale is a trap: export_listing writes every locale, and
+    apply_listing aborts the ENTIRE apply if any one of them busts a limit. An
+    audit that measures en-US alone reports clean and then the push refuses
+    everything, naming a locale the user was never shown a count for.
+    """
     root = os.path.join(repo, METADATA_ROOT)
     if not os.path.isdir(root):
-        return None
+        return []
     locales = sorted(d for d in os.listdir(root)
                      if os.path.isdir(os.path.join(root, d)))
     if not locales:
-        return None
+        return []
     if override:
-        return override if override in locales else None
-    sidecar = os.path.join(root, ".listing.json")
-    if os.path.exists(sidecar):
-        try:
-            with open(sidecar, encoding="utf-8") as fh:
-                primary = json.load(fh).get("app", {}).get("primaryLocale")
-            if primary in locales:
-                return primary
-        except (ValueError, OSError):
-            pass  # a broken sidecar should not stop the audit
-    if "en-US" in locales:
-        return "en-US"
-    return locales[0]
+        return [override] if override in locales else []
+    sidecar = read_sidecar(repo) or {}
+    primary = sidecar.get("app", {}).get("primaryLocale")
+    if primary not in locales:
+        primary = "en-US" if "en-US" in locales else locales[0]
+    return [primary] + [l for l in locales if l != primary]
 
 
-def read_metadata_dir(repo, locale):
+def read_metadata_locale(repo, locale, sidecar=None):
     """
     Read the store fields from fastlane/metadata/<locale>/*.txt.
 
@@ -255,7 +336,8 @@ def read_metadata_dir(repo, locale):
     boundaries, which then measures short and quietly passes a limit it busts.
     """
     base = os.path.join(repo, METADATA_ROOT, locale)
-    fields = {}
+    baseline = ((sidecar or {}).get("baseline", {}) or {}).get(locale, {}) or {}
+    fields, edited = {}, []
     for filename, name in METADATA_FILE_FIELDS.items():
         full = os.path.join(base, filename)
         if not os.path.exists(full):
@@ -265,19 +347,68 @@ def read_metadata_dir(repo, locale):
         if content.endswith("\n"):
             content = content[:-1]
         limit = FIELD_LIMITS[name]
-        n = len(content)
+        n = char_count(content)
         entry = {"chars": n, "limit": limit, "over_by": max(0, n - limit),
-                 "ok": n <= limit, "text": content}
+                 "ok": n <= limit, "text": content,
+                 "file": f"{METADATA_ROOT}/{locale}/{filename}"}
+        # Compare against the digest recorded at export. This is the whole
+        # "which files do I pass to apply_listing" question, answered offline:
+        # anything whose digest moved is an edit waiting to be pushed.
+        base_digest = baseline.get(SIDECAR_FIELD_KEYS[name])
+        if base_digest is not None:
+            entry["changed_since_export"] = digest(content) != base_digest
+            if entry["changed_since_export"]:
+                edited.append(name)
         if name == "KEYWORDS":
             entry.update(keyword_checks(content))
         fields[name] = entry
     return {
-        "exists": True,
-        "source": "metadata-dir",
         "locale": locale,
         "path": f"{METADATA_ROOT}/{locale}/",
         "fields": fields,
         "missing": sorted(set(FIELD_LIMITS) - set(fields)),
+        "edited_since_export": edited,
+    }
+
+
+def read_metadata_tree(repo, locales):
+    sidecar = read_sidecar(repo)
+    entries = [read_metadata_locale(repo, l, sidecar) for l in locales]
+    return {
+        "exists": True,
+        "source": "metadata-dir",
+        "path": f"{METADATA_ROOT}/",
+        "sidecar": sidecar_summary(sidecar),
+        "locales": entries,
+        # The primary locale is what the prose checks and the live diff act on;
+        # every locale is still measured against the limits.
+        "fields": entries[0]["fields"],
+        "missing": entries[0]["missing"],
+    }
+
+
+def sidecar_summary(sidecar):
+    """The bits of the sidecar an audit should report, chiefly the version state.
+
+    export_listing's "latest" falls through to READY_FOR_SALE when no editable
+    version exists, so the tree on disk can be the SHIPPED listing rather than the
+    one being prepared -- and apply writes back to the id frozen here. Surfacing
+    the state is what turns that from a silent overwrite into a decision.
+    """
+    if not sidecar:
+        return None
+    v = sidecar.get("version", {}) or {}
+    return {
+        "version": v.get("versionString"),
+        "app_store_state": v.get("appStoreState"),
+        "exported_at": sidecar.get("exportedAt"),
+        "locales": sorted((sidecar.get("localizationIds") or {}).keys()),
+        # Only PREPARE_FOR_SUBMISSION and the rejected states accept edits; the
+        # rest mean this export is pointed at a version you should not be editing.
+        "editable": v.get("appStoreState") in (
+            None, "PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED",
+            "METADATA_REJECTED", "REJECTED",
+        ),
     }
 
 
@@ -297,7 +428,10 @@ def parse_store_fields(repo, path=None):
     full = os.path.join(repo, path)
     if not os.path.exists(full):
         return {"exists": False, "source": "markdown-doc", "path": path,
-                "fields": {}, "missing": sorted(FIELD_LIMITS)}
+                "sidecar": None, "fields": {}, "missing": sorted(FIELD_LIMITS),
+                "locales": [{"locale": None, "path": path, "fields": {},
+                             "missing": sorted(FIELD_LIMITS),
+                             "edited_since_export": []}]}
     text = open(full, encoding="utf-8", errors="replace").read()
 
     # The store copy usually lives in a fenced block so it can be pasted verbatim,
@@ -343,20 +477,26 @@ def parse_store_fields(repo, path=None):
         stop = marks[i + 1][1] if i + 1 < len(marks) else len(body)
         content = clean_field_content(body[end:stop])
         limit = FIELD_LIMITS[name]
-        n = len(content)
+        n = char_count(content)
         entry = {"chars": n, "limit": limit, "over_by": max(0, n - limit), "ok": n <= limit,
-                 "text": content}
+                 "text": content, "file": path}
         if name == "KEYWORDS":
             entry.update(keyword_checks(content))
         # First occurrence wins; a later duplicate heading is usually a reference table.
         fields.setdefault(name, entry)
 
+    missing = sorted(set(FIELD_LIMITS) - set(fields))
     return {
         "exists": True,
         "source": "markdown-doc",
         "path": path,
+        "sidecar": None,
         "fields": fields,
-        "missing": sorted(set(FIELD_LIMITS) - set(fields)),
+        "missing": missing,
+        # One doc is one locale by construction; keep the shape the tree uses so
+        # the report and the exit gate have a single code path.
+        "locales": [{"locale": None, "path": path, "fields": fields,
+                     "missing": missing, "edited_since_export": []}],
     }
 
 
@@ -396,8 +536,12 @@ LIVE_KEY_ALIASES = {
     "promotionalText": "PROMOTIONAL TEXT",
     "promotional_text": "PROMOTIONAL TEXT",
     "subtitle": "SUBTITLE",
+    "name": "NAME",
     "whatsNew": "WHAT'S NEW",
     "whats_new": "WHAT'S NEW",
+    "marketingUrl": "MARKETING URL",
+    "supportUrl": "SUPPORT URL",
+    "privacyPolicyUrl": "PRIVACY URL",
 }
 
 
@@ -425,7 +569,7 @@ def compare_live(local, live):
     fields, drift = {}, []
     for name, text in sorted(live.items()):
         limit = FIELD_LIMITS[name]
-        n = len(text)
+        n = char_count(text)
         fields[name] = {"chars": n, "limit": limit, "over_by": max(0, n - limit), "ok": n <= limit}
         local_entry = local.get("fields", {}).get(name)
         if local_entry is None:
@@ -467,6 +611,11 @@ def scan_em_dashes(repo, paths):
 
     Rewording is the point -- swapping in a hyphen keeps the same tell. The fix
     is a comma, a colon, a parenthetical, or two sentences.
+
+    Only store copy is scanned here. The changelog gets its own advisory pass:
+    it is read by developers, not customers or a reviewer, so an em dash in it is
+    a style preference rather than the tell this check exists to catch. Mixing the
+    two buries the lines that actually ship.
     """
     hits = []
     for p in paths:
@@ -533,10 +682,19 @@ def find_screenshot_config(repo):
 
 # --------------------------------------------------------------------------
 
+def version_key(v):
+    """Sort key for a version string, so ordering does not depend on file layout."""
+    return tuple(int(p) if p.isdigit() else 0 for p in v.split("."))
+
+
 def audit(repo, fields_file=None, live_fields=None, locale=None):
     versions = read_versions(repo)
     cl = parse_changelog(repo)
     dated = [v for v in cl["versions"] if v["version"].lower() != "unreleased" and v["date"]]
+    # Newest-first is the Keep a Changelog convention, but a project that writes
+    # oldest-first would otherwise invert the release boundary silently -- and a
+    # wrong boundary means documenting the wrong set of commits. Sort, don't assume.
+    dated.sort(key=lambda v: version_key(v["version"]), reverse=True)
     last_released = dated[0]["version"] if dated else None
     prev_released = dated[1]["version"] if len(dated) > 1 else None
 
@@ -552,20 +710,32 @@ def audit(repo, fields_file=None, live_fields=None, locale=None):
     # A fastlane metadata tree is unambiguous, so prefer it; an explicit
     # --fields-file still wins, and a project without the tree keeps the
     # markdown-doc parser it has always used.
-    metadata_locale = None if fields_file else find_metadata_locale(repo, locale)
-    if metadata_locale:
-        store = read_metadata_dir(repo, metadata_locale)
+    metadata_locales = [] if fields_file else find_metadata_locales(repo, locale)
+    if metadata_locales:
+        store = read_metadata_tree(repo, metadata_locales)
         # The prose lives in several files now, so the em-dash scan takes a list.
-        # screenshot_sync still wants one document to look for taglines in; the
-        # description is where a tagline would appear.
-        prose = [f"{METADATA_ROOT}/{metadata_locale}/{n}" for n in
-                 ("description.txt", "release_notes.txt", "promotional_text.txt", "subtitle.txt")]
-        store_doc = f"{METADATA_ROOT}/{metadata_locale}/description.txt"
+        # Every locale is scanned: copy written by a translator drifts the same way.
+        prose = [f"{METADATA_ROOT}/{loc}/{n}"
+                 for loc in metadata_locales
+                 for n in ("description.txt", "release_notes.txt",
+                           "promotional_text.txt", "subtitle.txt")]
+        # screenshot_sync wants one document to look for taglines in; the primary
+        # locale's description is where a tagline would appear.
+        store_doc = f"{METADATA_ROOT}/{metadata_locales[0]}/description.txt"
     else:
         store_doc = find_store_doc(repo, fields_file)
         store = parse_store_fields(repo, store_doc)
         prose = [store_doc]
     live = compare_live(store, normalize_live_fields(live_fields) if live_fields is not None else None)
+
+    # Release notes are required once there is a previous release to differ from,
+    # but Apple rejects a "What's New" on a first version -- so demanding one for a
+    # 1.0 would gate the release on copy that must not exist.
+    required = set(REQUIRED_FIELDS)
+    if not last_released:
+        required.discard("WHAT'S NEW")
+    for entry in store["locales"]:
+        entry["missing_required"] = sorted(required - set(entry["fields"]))
 
     return {
         "repo": repo,
@@ -581,7 +751,8 @@ def audit(repo, fields_file=None, live_fields=None, locale=None):
         "unannounced_from_last_release": find_unannounced(repo, cl["path"], prev_boundary, boundary),
         "store": store,
         "live": live,
-        "em_dashes": scan_em_dashes(repo, prose + ["CHANGELOG.md"] + ([cfg] if cfg else [])),
+        "em_dashes": scan_em_dashes(repo, prose + ([cfg] if cfg else [])),
+        "em_dashes_changelog": scan_em_dashes(repo, ["CHANGELOG.md"]),
         "screenshots": screenshot_sync(repo, cfg, store_doc) if cfg else None,
     }
 
@@ -592,6 +763,9 @@ def report(a):
     L.append("VERSION")
     L.append(f"  shipping (MARKETING_VERSION): {v['marketing_version'] or '??'}  build {v['build'] or '?'}")
     L.append(f"  last documented release:      {v['last_documented_release'] or 'none'}")
+    if v.get("ambiguous_version"):
+        L.append(f"  ! pbxproj holds several MARKETING_VERSIONs: {', '.join(v['all_marketing_versions'])}")
+        L.append("    The first one was used. Confirm it belongs to the app target, not a test target.")
     if v["already_documented"]:
         L.append(f"  ! {v['marketing_version']} already has a dated CHANGELOG entry -- is this release already cut?")
     if v["marketing_version"] and v["marketing_version"] == v["last_documented_release"]:
@@ -624,17 +798,45 @@ def report(a):
     L.append("")
 
     s = a["store"]
+    sidecar = s.get("sidecar")
+    if sidecar:
+        L.append("EXPORTED LISTING  (fastlane/metadata/.listing.json)")
+        L.append(f"  version {sidecar['version']}  state {sidecar['app_store_state'] or 'unknown'}"
+                 f"  exported {sidecar['exported_at']}")
+        if not sidecar["editable"]:
+            L.append(f"  ! this export is pointed at a {sidecar['app_store_state']} version -- the SHIPPED one.")
+            L.append("    export_listing's \"latest\" falls back to the live version when no editable one")
+            L.append("    exists, so applying release notes here edits the release that is already out.")
+            L.append("    Create the new version first (app_store_connect_create_version), then re-export.")
+            L.append("    Note NAME, SUBTITLE and PRIVACY URL are appInfo-scoped and bypass version state")
+            L.append("    entirely, so they are not protected even on an editable version.")
+        L.append("")
+
     origin = "metadata tree" if s.get("source") == "metadata-dir" else "markdown doc"
     L.append(f"APP STORE FIELDS  ({s['path']} -- {origin})")
     if not s["exists"]:
         L.append("  ! file does not exist -- every field needs writing from scratch")
-    for name, f in s["fields"].items():
-        flag = "OK  " if f["ok"] else "OVER"
-        L.append(f"  {flag} {name:<18} {f['chars']:>5} / {f['limit']}" + (f"  (over by {f['over_by']})" if not f["ok"] else ""))
-        for note in f.get("notes", []):
-            L.append(f"       - {note}")
-    for name in s["missing"]:
-        L.append(f"  MISSING {name:<14} (limit {FIELD_LIMITS[name]})")
+    for entry in s["locales"]:
+        if entry["locale"]:
+            L.append(f"  [{entry['locale']}]")
+        for name, f in entry["fields"].items():
+            flag = "OK  " if f["ok"] else "OVER"
+            # A field edited since export is what you pass to apply_listing; a field
+            # that never had a baseline (no sidecar, or newly created) is unknown, not
+            # unchanged, so it gets no marker rather than a misleading one.
+            mark = " *" if f.get("changed_since_export") else ""
+            L.append(f"  {flag} {name:<18} {f['chars']:>5} / {f['limit']}"
+                     + (f"  (over by {f['over_by']})" if not f["ok"] else "") + mark)
+            for note in f.get("notes", []):
+                L.append(f"       - {note}")
+        for name in entry["missing"]:
+            tag = "MISSING " if name in entry.get("missing_required", []) else "unset   "
+            L.append(f"  {tag}{name:<16} (limit {FIELD_LIMITS[name]})")
+        if entry["edited_since_export"]:
+            files = [entry["fields"][n]["file"] for n in entry["edited_since_export"]]
+            L.append("  * edited since export, pass these to apply_listing:")
+            for p in files:
+                L.append(f"      {p}")
     L.append("")
 
     live = a.get("live")
@@ -654,7 +856,7 @@ def report(a):
         L.append("")
 
     em = a["em_dashes"]
-    L.append("EM DASHES IN PROSE")
+    L.append("EM DASHES IN STORE PROSE")
     if em:
         L.append(f"  {len(em)} line(s). Reword them -- a hyphen is the same tell.")
         for h in em[:20]:
@@ -663,6 +865,11 @@ def report(a):
             L.append(f"    ... and {len(em) - 20} more")
     else:
         L.append("  none outside bullet-label separators")
+    cl_em = a.get("em_dashes_changelog") or []
+    if cl_em:
+        # Advisory only: the changelog is read by developers, not by customers or
+        # an App Store reviewer, so this is taste rather than the machine-written tell.
+        L.append(f"  ({len(cl_em)} more in CHANGELOG.md -- developer-facing, so optional)")
     L.append("")
 
     sc = a["screenshots"]
@@ -692,8 +899,9 @@ def main():
                     help="Repo-relative path to the store-copy doc. Auto-detected when omitted "
                          "(APPSTORE.md, STORES.md, ...).")
     ap.add_argument("--locale", default=None,
-                    help="Locale directory to audit under fastlane/metadata/. Defaults to the "
-                         "primaryLocale in .listing.json, else en-US.")
+                    help="Narrow the audit to ONE locale under fastlane/metadata/. Every locale "
+                         "is audited by default, because apply_listing refuses the whole push if "
+                         "any single locale is over limit.")
     ap.add_argument("--live-fields", default=None,
                     help="JSON file of the LIVE App Store Connect fields, to diff against the "
                          "local doc. Accepts API keys (description, keywords, promotionalText, "
@@ -719,10 +927,12 @@ def main():
     else:
         print(report(a))
     # Exit non-zero when something is objectively wrong, so this can gate a release.
-    broken = (
-        any(not f["ok"] for f in a["store"]["fields"].values())
-        or a["store"]["missing"]
-        or not a["store"]["exists"]
+    # Every locale counts: apply_listing refuses the whole push if any one of them
+    # is over. Only genuinely required fields gate -- an unset marketing URL is a
+    # choice, and failing the build over it would train people to ignore the gate.
+    broken = not a["store"]["exists"] or any(
+        any(not f["ok"] for f in entry["fields"].values()) or entry["missing_required"]
+        for entry in a["store"]["locales"]
     )
     return 1 if broken else 0
 
