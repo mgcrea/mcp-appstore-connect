@@ -2,15 +2,22 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import type { AppStoreConnectClient } from "../client/asc.js";
-import { summarizeResponse } from "../client/shape.js";
-import { appIdArg, compact, limitArg, wrap } from "./util.js";
-
-const PLATFORMS = ["IOS", "MAC_OS", "TV_OS", "VISION_OS"] as const;
-
-const versionIdArg = z
-  .string()
-  .min(1)
-  .describe("The appStoreVersion id (from app_store_connect_list_versions).");
+import {
+  attributesOf,
+  firstIncluded,
+  relatedId,
+  resourceOf,
+  summarizeResponse,
+} from "../client/shape.js";
+import {
+  PLATFORMS,
+  PreconditionError,
+  appIdArg,
+  compact,
+  limitArg,
+  versionIdArg,
+  wrap,
+} from "./util.js";
 
 const localizationIdArg = z
   .string()
@@ -22,39 +29,6 @@ const localizationIdArg = z
 /** Apple only accepts a build change while the version is still editable. */
 const EDITABLE_STATES = ["PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED"];
 
-type Rec = Record<string, unknown>;
-
-const isRecord = (value: unknown): value is Rec =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const resource = (response: unknown): Rec =>
-  isRecord(response) && isRecord(response.data) ? response.data : {};
-
-const attributes = (res: Rec): Rec => (isRecord(res.attributes) ? res.attributes : {});
-
-/** The id on the far side of a to-one relationship, e.g. which app a build belongs to. */
-const relatedId = (res: Rec, name: string): string | undefined => {
-  const rels = isRecord(res.relationships) ? res.relationships : {};
-  const rel = isRecord(rels[name]) ? (rels[name] as Rec) : {};
-  return isRecord(rel.data) && typeof rel.data.id === "string" ? rel.data.id : undefined;
-};
-
-/** Pull a sideloaded resource out of the top-level `included` array. */
-const included = (response: unknown, type: string): Rec | undefined => {
-  if (!isRecord(response) || !Array.isArray(response.included)) return undefined;
-  return response.included.find((item) => isRecord(item) && item.type === type) as Rec | undefined;
-};
-
-class PreconditionError extends Error {
-  override readonly name = "PreconditionError";
-  constructor(
-    message: string,
-    readonly details: Rec,
-  ) {
-    super(message);
-  }
-}
-
 /**
  * Apple answers a bad build attach with a bare 409 that names no cause, so we
  * read both resources first and report every failing precondition at once.
@@ -62,11 +36,11 @@ class PreconditionError extends Error {
  * round trip instead of playing whack-a-mole.
  */
 const assertAttachable = (versionResponse: unknown, buildResponse: unknown): void => {
-  const version = resource(versionResponse);
-  const build = resource(buildResponse);
-  const versionAttrs = attributes(version);
-  const buildAttrs = attributes(build);
-  const preRelease = attributes(included(buildResponse, "preReleaseVersions") ?? {});
+  const version = resourceOf(versionResponse);
+  const build = resourceOf(buildResponse);
+  const versionAttrs = attributesOf(version);
+  const buildAttrs = attributesOf(build);
+  const preRelease = attributesOf(firstIncluded(buildResponse, "preReleaseVersions") ?? {});
 
   const appStoreState = versionAttrs.appStoreState;
   const versionString = versionAttrs.versionString;

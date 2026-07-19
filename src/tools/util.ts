@@ -85,6 +85,22 @@ export const fieldsArg = z
       "Omit to return every attribute of each resource.",
   );
 
+export const PLATFORMS = ["IOS", "MAC_OS", "TV_OS", "VISION_OS"] as const;
+
+/**
+ * A local check that failed before we sent anything to Apple. Carries the state
+ * it read, so the caller sees why rather than just that something was wrong.
+ */
+export class PreconditionError extends Error {
+  override readonly name = "PreconditionError";
+  constructor(
+    message: string,
+    readonly details: Record<string, unknown>,
+  ) {
+    super(message);
+  }
+}
+
 /** The App Store Connect resource id of an app (from list_apps), not its bundle id. */
 export const appIdArg = z
   .string()
@@ -92,6 +108,11 @@ export const appIdArg = z
   .describe(
     "The app's App Store Connect id (the `id` from app_store_connect_list_apps), NOT its bundle id.",
   );
+
+export const versionIdArg = z
+  .string()
+  .min(1)
+  .describe("The appStoreVersion id (from app_store_connect_list_versions).");
 
 /** Destructive tools require this, so an agent can never mutate something in passing. */
 export const confirmArg = z
