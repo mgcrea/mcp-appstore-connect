@@ -4,7 +4,10 @@
     "pixelwright": "Mature listing kept as a metadata tree: fastlane/metadata/en-US/ with name.txt, subtitle.txt, description.txt (3623/4000), promotional_text.txt and the three URL files, plus a fastlane/metadata/.listing.json sidecar carrying the localization ids and per-field baseline digests. keywords.txt and release_notes.txt are absent. One feature (batch export) shipped in the 2.0.0 build but was never written into the changelog. Em dashes in description prose. Screenshot config not documented. pbxproj says 2.1.0.",
     "pixelwright-drifted": "Same tree as pixelwright, except the live App Store Connect listing has moved since export: promotional_text and subtitle were edited in the web UI, so their live values no longer match the baseline digests recorded in .listing.json. The local promotional_text.txt is also edited. Exercises the three-way merge.",
     "harborlight": "No metadata tree. Store copy lives in a single APPSTORE.md whose description section contains its own '## Keywords' heading, so a naive section parser truncates the description and measures it short — it is actually 4180 chars, over the limit. pbxproj says 1.4.0.",
-    "tidepool": "No APPSTORE.md and no metadata tree. Only a changelog and git history. pbxproj says 1.2.0."
+    "tidepool": "No APPSTORE.md and no metadata tree. Only a changelog and git history. pbxproj says 1.2.0.",
+    "pixelwright-noversion": "Same tree as pixelwright, except App Store Connect has no editable version — the only version is 2.0.0 in READY_FOR_SALE, so the export fell back to the shipped listing and .listing.json records appStoreState READY_FOR_SALE with versionString 2.0.0. pbxproj says 2.1.0, so the version being documented does not exist upstream yet.",
+    "pixelwright-multilocale": "Same tree as pixelwright plus fr-FR and de-DE locale directories. en-US is comfortably inside every limit; fr-FR/keywords.txt is 111 chars and de-DE/subtitle.txt is 34. Both over-limit locales are non-primary, so neither is the one a single-locale audit would look at.",
+    "pixelwright-emoji": "Same tree as pixelwright, except description.txt ends with two emoji and measures 3,998 code points but 4,000 UTF-16 units — exactly at the limit, so any addition busts it. Distinguishes an audit that counts the way Apple counts from one that uses a naive length."
   },
   "evals": [
     {
@@ -100,6 +103,54 @@
         "SUBTITLE present and within 30 chars",
         "No em dashes in store prose (bullet-label separators exempt)",
         "The result passes the audit, and final character counts are reported back"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "no-editable-version",
+      "fixture": "pixelwright-noversion",
+      "prompt": "pixelwright 2.1 is ready, pull the listing down and get the release notes written and pushed",
+      "expected_output": "The export targeted the shipped 2.0.0 listing because no editable version exists. That must be caught before any release notes are applied — 2.1.0 has to be created in App Store Connect and the listing re-exported, otherwise the What's New overwrites the release that is already out.",
+      "assertions": [
+        "The exported version's appStoreState is checked, not assumed to be editable",
+        "READY_FOR_SALE is identified as the SHIPPED version, not the one being prepared",
+        "create_version is proposed for 2.1.0 before any apply_listing is attempted",
+        "The listing is re-exported after the version is created, so .listing.json carries the new version id",
+        "release_notes.txt is NOT applied against the 2.0.0 localization id",
+        "The user is told that name/subtitle/privacy_url are appInfo-scoped and edit the live listing regardless of version state",
+        "A clean dry-run report is not mistaken for proof that the write targets the right version",
+        "The user is asked before the non-dry-run apply"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "multi-locale-limits",
+      "fixture": "pixelwright-multilocale",
+      "prompt": "get the 2.1 store copy finished for pixelwright so i can push it",
+      "expected_output": "en-US is fine, but fr-FR keywords (111) and de-DE subtitle (34) are over. Both must be found and cut before pushing, since apply_listing rejects the entire push if any locale is over limit — including the en-US work that was correct.",
+      "assertions": [
+        "Every locale in the tree is audited, not only en-US",
+        "fr-FR keywords is identified as over 100 chars",
+        "de-DE subtitle is identified as over 30 chars",
+        "Both are cut to fit rather than left for the push to reject",
+        "It is understood that one over-limit locale blocks the whole apply, not just its own locale",
+        "Release notes written for en-US are not silently left stale in fr-FR and de-DE — the staleness is surfaced",
+        "Non-English copy is not machine-translated and presented as ready to ship",
+        "Final per-locale character counts are reported back"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "emoji-character-counting",
+      "fixture": "pixelwright-emoji",
+      "prompt": "can you add a line about the new compare slider to the pixelwright description",
+      "expected_output": "The description is already at exactly 4,000 of 4,000 once emoji are counted as UTF-16 units. Adding anything requires removing at least as much, and an audit that reports 3,998 would wrongly imply there is room.",
+      "assertions": [
+        "The description is measured at 4,000, not 3,998 — emoji count as 2",
+        "The field is recognized as having zero headroom before new copy is written",
+        "Existing copy is cut to make room rather than the description being pushed over",
+        "The final description is within 4,000 UTF-16 units",
+        "The reported count matches what App Store Connect would compute, so the push is not rejected after a passing audit"
       ]
     }
   ]
