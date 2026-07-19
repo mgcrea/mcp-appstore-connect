@@ -18,6 +18,12 @@ export type ToolContext = {
   allowWrites: boolean;
   /** Vendor number for sales/finance reports. Reports fail with a clear error when unset. */
   vendorNumber?: string | undefined;
+  /**
+   * Where this repo keeps its metadata tree, already normalized. Baked into the
+   * listing tool descriptions at registration time, which is the only channel
+   * that tells the caller where to write the files.
+   */
+  metadataRoot: string;
 };
 
 /**
@@ -34,7 +40,7 @@ export const registerTools = (
   registerAppTools(server, client, allowWrites);
   registerVersionTools(server, client, allowWrites);
   registerAppInfoTools(server, client, allowWrites);
-  registerListingTools(server, client, allowWrites);
+  registerListingTools(server, client, ctx);
   registerScreenshotTools(server, client, allowWrites);
   registerBuildTools(server, client, allowWrites);
   registerTestflightTools(server, client, allowWrites);

@@ -51,6 +51,7 @@ export const createServer = (opts: CreateServerOptions): CreatedServer => {
   registerTools(server, client, {
     allowWrites: config.allowWrites,
     vendorNumber: config.vendorNumber,
+    metadataRoot: config.metadataRoot,
   });
   return { server, client, tokenProvider };
 };

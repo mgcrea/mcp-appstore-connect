@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import { SIDECAR_PATH, type ListingDocument, digest, toSidecar } from "../src/listing/document.js";
+import {
+  DEFAULT_METADATA_ROOT,
+  type ListingDocument,
+  MetadataRootError,
+  digest,
+  normalizeMetadataRoot,
+  sidecarPath,
+  toSidecar,
+} from "../src/listing/document.js";
 import { parseManifest, toManifest } from "../src/listing/manifest.js";
 import { renderReview } from "../src/listing/review.js";
+
+const SIDECAR_PATH = sidecarPath(DEFAULT_METADATA_ROOT);
 
 /**
  * The exact content a single-document format would mangle: markdown headings
@@ -61,6 +71,9 @@ const doc = (): ListingDocument => ({
     "fr-FR": {},
   },
 });
+
+/** A valid sidecar body, for tests that care about paths rather than content. */
+const SIDECAR_JSON = JSON.stringify(toSidecar(doc()));
 
 describe("metadata manifest", () => {
   it("round-trips content that would break a single-document format", () => {
@@ -148,6 +161,99 @@ describe("metadata manifest", () => {
     expect(() => parseManifest([{ path: SIDECAR_PATH, content: "{nope" }])).toThrow(
       /not valid JSON/,
     );
+  });
+});
+
+describe("metadata root", () => {
+  it.each(["fastlane/metadata", "Metadata", "a/b/c/meta", ""])(
+    "round-trips a tree rooted at %j",
+    (root) => {
+      const files = toManifest(doc(), root);
+      const prefix = root === "" ? "" : `${root}/`;
+      expect(files.map((f) => f.path)).toContain(`${prefix}en-US/description.txt`);
+      expect(files.map((f) => f.path)).toContain(`${prefix}.listing.json`);
+
+      const parsed = parseManifest(files);
+      expect(parsed.locales["en-US"]?.description).toBe(HOSTILE_DESCRIPTION);
+      expect(parsed.sidecar).toEqual(toSidecar(doc()));
+    },
+  );
+
+  /**
+   * The old normalizePath sliced at the LAST occurrence of the root, so a repo
+   * path that happened to repeat the root name lost everything before the
+   * second one. Nothing catches that downstream — it applies against the wrong
+   * ids — so it is pinned here rather than left to the round-trip tests.
+   */
+  it("does not mis-slice a path that repeats the root name", () => {
+    const files = [
+      { path: "a/meta/b/meta/.listing.json", content: SIDECAR_JSON },
+      { path: "a/meta/b/meta/en-US/description.txt", content: "hi\n" },
+    ];
+    expect(parseManifest(files).locales["en-US"]?.description).toBe("hi");
+  });
+
+  it("rejects field files from a different tree than the sidecar", () => {
+    const files = [
+      { path: "Metadata/.listing.json", content: SIDECAR_JSON },
+      { path: "fastlane/metadata/en-US/description.txt", content: "hi\n" },
+    ];
+    expect(() => parseManifest(files)).toThrow(/must live under "Metadata\/"/);
+  });
+
+  it("refuses more than one sidecar rather than letting the last one win", () => {
+    const files = [
+      { path: "Metadata/.listing.json", content: SIDECAR_JSON },
+      { path: "fastlane/metadata/.listing.json", content: SIDECAR_JSON },
+    ];
+    expect(() => parseManifest(files)).toThrow(/More than one \.listing\.json/);
+  });
+
+  it("accepts windows separators on both the sidecar and the fields", () => {
+    const files = toManifest(doc(), "Metadata").map((f) => ({
+      path: f.path.replace(/\//g, "\\"),
+      content: f.content,
+    }));
+    expect(parseManifest(files).locales["en-US"]?.description).toBe(HOSTILE_DESCRIPTION);
+  });
+
+  it("rejects a path containing ..", () => {
+    const files = [
+      { path: SIDECAR_PATH, content: SIDECAR_JSON },
+      { path: "fastlane/metadata/../metadata/en-US/description.txt", content: "hi\n" },
+    ];
+    expect(() => parseManifest(files)).toThrow(/contains "\.\."/);
+  });
+
+  /**
+   * Known regression from inferring the root: the two path styles no longer
+   * normalize to a common form. Pinned deliberately — both sets come from one
+   * export_listing response written by one agent, so mixing them means the
+   * caller assembled the list by hand and the mismatch is worth surfacing.
+   */
+  it("rejects an absolute sidecar paired with relative field files", () => {
+    const files = [
+      { path: "/repo/fastlane/metadata/.listing.json", content: SIDECAR_JSON },
+      { path: "fastlane/metadata/en-US/description.txt", content: "hi\n" },
+    ];
+    expect(() => parseManifest(files)).toThrow(/same style of path/);
+  });
+});
+
+describe("normalizeMetadataRoot", () => {
+  it.each([
+    ["fastlane/metadata", "fastlane/metadata"],
+    [".", ""],
+    ["", ""],
+    ["./Metadata/", "Metadata"],
+    ["a//b/", "a/b"],
+    ["Metadata\\en", "Metadata/en"],
+  ])("normalizes %j to %j", (input, expected) => {
+    expect(normalizeMetadataRoot(input)).toBe(expected);
+  });
+
+  it.each(["/abs/path", "C:/x", "a/../b", "x/.listing.json"])("rejects %j", (input) => {
+    expect(() => normalizeMetadataRoot(input)).toThrow(MetadataRootError);
   });
 });
 

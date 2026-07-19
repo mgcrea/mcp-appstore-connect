@@ -14,6 +14,7 @@ const baseConfig: Config = {
   allowWrites: true,
   maxRetries: 3,
   tokenTtlSeconds: 1140,
+  metadataRoot: "fastlane/metadata",
 };
 
 const jsonResponse = (body: unknown): Response =>
@@ -314,6 +315,63 @@ describe("export_listing", () => {
     const md = text(result);
     expect(md.startsWith("# com.acme.app — 1.4.0")).toBe(true);
     expect(md).toContain("### Description — 17/4000");
+  });
+});
+
+describe("a relocated metadata tree", () => {
+  it("export_listing writes the tree wherever metadataRoot says", async () => {
+    const client = await connect(routes(exportRoutes()));
+    const result = await client.callTool({
+      name: "app_store_connect_export_listing",
+      arguments: { appId: "1234567890", metadataRoot: "AppStore" },
+    });
+    const payload = JSON.parse(text(result)) as {
+      files: { path: string; content: string }[];
+      note: string;
+    };
+    const paths = payload.files.map((f) => f.path);
+
+    expect(paths).toContain("AppStore/.listing.json");
+    expect(paths).toContain("AppStore/en-US/description.txt");
+    expect(paths.some((p) => p.startsWith("fastlane/"))).toBe(false);
+    expect(payload.note).toContain("AppStore/.listing.json");
+  });
+
+  it("export_listing refuses a root that is not a plain relative path", async () => {
+    const client = await connect(routes(exportRoutes()));
+    const result = await client.callTool({
+      name: "app_store_connect_export_listing",
+      arguments: { appId: "1234567890", metadataRoot: "/etc/passwd" },
+    });
+    expect(text(result)).toMatch(/absolute/i);
+  });
+
+  /**
+   * The point of the whole feature: apply is never told where the tree is, and
+   * still patches the same rows as the default-root test above.
+   */
+  it("apply_listing finds the tree from the sidecar alone", async () => {
+    const fetchImpl = routes(exportRoutes());
+    const client = await connect(fetchImpl);
+    const result = await client.callTool({
+      name: "app_store_connect_apply_listing",
+      arguments: {
+        files: [
+          { path: "AppStore/.listing.json", content: sidecar() },
+          { path: "AppStore/en-US/description.txt", content: "New description.\n" },
+        ],
+        dryRun: false,
+        confirm: true,
+      },
+    });
+    const payload = JSON.parse(text(result)) as { applied: boolean };
+    expect(payload.applied).toBe(true);
+
+    const patches = writeCalls(fetchImpl);
+    expect(patches).toHaveLength(1);
+    expect(JSON.parse(patches[0]![1].body as string).data.attributes.description).toBe(
+      "New description.",
+    );
   });
 });
 

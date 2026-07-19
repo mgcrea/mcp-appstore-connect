@@ -1,4 +1,5 @@
 import {
+  DEFAULT_METADATA_ROOT,
   FIELDS,
   FIELD_LIMITS,
   type ListingDocument,
@@ -38,7 +39,10 @@ const DISPLAY_ORDER: ListingField[] = [
  * The metadata tree is the format, and keeping the readable view lossy is what
  * lets it stay readable — no escaping, no sentinels, no round-trip constraints.
  */
-export const renderReview = (doc: ListingDocument): string => {
+export const renderReview = (
+  doc: ListingDocument,
+  metadataRoot: string = DEFAULT_METADATA_ROOT,
+): string => {
   const out: string[] = [];
   const { app, version } = doc;
 
@@ -48,7 +52,11 @@ export const renderReview = (doc: ListingDocument): string => {
     `${version.platform} · ${version.appStoreState ?? "unknown state"} · exported ${doc.exportedAt}`,
   );
   out.push("");
-  out.push("_Read-only view. Edit the files under `fastlane/metadata/` instead._");
+  out.push(
+    metadataRoot === ""
+      ? "_Read-only view. Edit the metadata files at the repo root instead._"
+      : `_Read-only view. Edit the files under \`${metadataRoot}/\` instead._`,
+  );
 
   for (const locale of orderLocales(Object.keys(doc.locales), app.primaryLocale)) {
     const fields = doc.locales[locale] ?? {};

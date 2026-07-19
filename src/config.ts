@@ -4,6 +4,27 @@ import { join } from "node:path";
 
 import { z } from "zod";
 
+import {
+  DEFAULT_METADATA_ROOT,
+  MetadataRootError,
+  normalizeMetadataRoot,
+} from "./listing/document.js";
+
+/**
+ * Shared by both schemas so a bad root is rejected the same way whether it came
+ * from the env or the config file, and normalized before anything reads it.
+ */
+const metadataRootSchema = z.string().superRefine((value, ctx) => {
+  try {
+    normalizeMetadataRoot(value);
+  } catch (err) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: err instanceof MetadataRootError ? err.message : message(err),
+    });
+  }
+});
+
 const ConfigSchema = z
   .object({
     keyId: z.string().min(1, "APP_STORE_CONNECT_KEY_ID is required (the 10-char key id)"),
@@ -20,6 +41,7 @@ const ConfigSchema = z
     allowWrites: z.boolean().default(false),
     maxRetries: z.number().int().nonnegative().max(10).default(3),
     tokenTtlSeconds: z.number().int().min(60).max(1200).default(1140),
+    metadataRoot: metadataRootSchema.default(DEFAULT_METADATA_ROOT).transform(normalizeMetadataRoot),
   })
   .strict();
 
@@ -43,6 +65,7 @@ const FileConfigSchema = z
     allowWrites: z.boolean().optional(),
     maxRetries: z.number().int().nonnegative().max(10).optional(),
     tokenTtlSeconds: z.number().int().min(60).max(1200).optional(),
+    metadataRoot: metadataRootSchema.optional(),
   })
   .strict();
 
@@ -195,5 +218,7 @@ export const loadConfig = (
     allowWrites: parseBool(env.APP_STORE_CONNECT_ALLOW_WRITES) ?? file.allowWrites,
     maxRetries: parseIntOpt(env.APP_STORE_CONNECT_MAX_RETRIES) ?? file.maxRetries,
     tokenTtlSeconds: parseIntOpt(env.APP_STORE_CONNECT_TOKEN_TTL_SECONDS) ?? file.tokenTtlSeconds,
+    // `trimmed` maps "" to undefined, so the repo root is spelled "." here.
+    metadataRoot: trimmed(env.APP_STORE_CONNECT_METADATA_ROOT) ?? file.metadataRoot,
   });
 };

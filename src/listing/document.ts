@@ -11,8 +11,60 @@ import { z } from "zod";
  * looks like its own syntax, and when that escaping is wrong the failure is
  * silent — a truncated description pushed live.
  */
-export const METADATA_ROOT = "fastlane/metadata";
-export const SIDECAR_PATH = `${METADATA_ROOT}/.listing.json`;
+export const DEFAULT_METADATA_ROOT = "fastlane/metadata";
+export const SIDECAR_BASENAME = ".listing.json";
+
+/** "" is the repo root, so the join has to drop the separator rather than emit "/x". */
+export const sidecarPath = (root: string): string =>
+  root === "" ? SIDECAR_BASENAME : `${root}/${SIDECAR_BASENAME}`;
+
+export const localeDir = (root: string, locale: string): string =>
+  root === "" ? locale : `${root}/${locale}`;
+
+export class MetadataRootError extends Error {}
+
+/**
+ * Canonical form of a metadata root: relative, POSIX separators, no trailing
+ * slash, "" for the repo root. Mirrored by normalize_metadata_root() in
+ * plugins/appstore-toolkit/skills/appstore-release-prep/scripts/audit_release.py
+ * — change both together.
+ *
+ * The rejections are deliberate rather than defensive. A root is used as a
+ * string prefix on both sides of the round trip, so an absolute or ".."-bearing
+ * value would make the same tree normalize two different ways depending on who
+ * spelled it, and the mismatch would surface as "unexpected path" on a file the
+ * user can see is right there.
+ */
+export const normalizeMetadataRoot = (raw: string): string => {
+  const unix = raw.replace(/\\/g, "/").replace(/\/+/g, "/");
+
+  if (unix.startsWith("/") || /^[A-Za-z]:/.test(unix)) {
+    throw new MetadataRootError(
+      `Metadata root "${raw}" is absolute. Give a path relative to the repo root, ` +
+        `e.g. "${DEFAULT_METADATA_ROOT}", or "." for the repo root itself.`,
+    );
+  }
+
+  const trimmed = unix.replace(/^\.\//, "").replace(/\/$/, "");
+  if (trimmed === "" || trimmed === ".") return "";
+
+  for (const segment of trimmed.split("/")) {
+    if (segment === "" || segment === "." || segment === "..") {
+      throw new MetadataRootError(
+        `Metadata root "${raw}" must be a plain relative path — "${segment || "//"}" is not a ` +
+          `directory name. Write it out in full, e.g. "${DEFAULT_METADATA_ROOT}".`,
+      );
+    }
+    if (segment === SIDECAR_BASENAME) {
+      throw new MetadataRootError(
+        `Metadata root "${raw}" points at ${SIDECAR_BASENAME} itself. The root is the directory ` +
+          `that contains it, e.g. "${DEFAULT_METADATA_ROOT}".`,
+      );
+    }
+  }
+
+  return trimmed;
+};
 
 export type ListingField =
   | "name"

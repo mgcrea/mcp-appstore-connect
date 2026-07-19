@@ -13,6 +13,7 @@ const baseConfig: Config = {
   allowWrites: false,
   maxRetries: 3,
   tokenTtlSeconds: 1140,
+  metadataRoot: "fastlane/metadata",
 };
 
 const jsonResponse = (body: unknown): Response =>

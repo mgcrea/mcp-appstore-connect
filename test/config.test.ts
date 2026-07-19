@@ -49,6 +49,7 @@ describe("loadConfig", () => {
     expect(config.maxRetries).toBe(3);
     expect(config.tokenTtlSeconds).toBe(1140);
     expect(config.vendorNumber).toBeUndefined();
+    expect(config.metadataRoot).toBe("fastlane/metadata");
   });
 
   it("reads the key from a .p8 file path", () => {
@@ -186,6 +187,49 @@ describe("loadConfig from a config file", () => {
 
   it("is silent when the file is absent", () => {
     expect(() => loadConfig(baseEnv(), join(tmp(), "nope.json"))).not.toThrow();
+  });
+});
+
+describe("metadataRoot", () => {
+  it("reads the root from the config file", () => {
+    const path = configFile({
+      keyId: "ABCD123456",
+      issuerId: "69a6de70-0000-0000-0000-000000000000",
+      p8: pem,
+      metadataRoot: "AppStore",
+    });
+    expect(loadConfig({}, path).metadataRoot).toBe("AppStore");
+  });
+
+  it("lets the env override the file", () => {
+    const path = configFile({
+      keyId: "ABCD123456",
+      issuerId: "69a6de70-0000-0000-0000-000000000000",
+      p8: pem,
+      metadataRoot: "AppStore",
+    });
+    const env = { APP_STORE_CONNECT_METADATA_ROOT: "Metadata" };
+    expect(loadConfig(env, path).metadataRoot).toBe("Metadata");
+  });
+
+  it("normalizes the value rather than storing it as written", () => {
+    const env = { ...baseEnv(), APP_STORE_CONNECT_METADATA_ROOT: "./AppStore/" };
+    expect(loadConfig(env, noConfig).metadataRoot).toBe("AppStore");
+  });
+
+  it('accepts "." for the repo root', () => {
+    const env = { ...baseEnv(), APP_STORE_CONNECT_METADATA_ROOT: "." };
+    expect(loadConfig(env, noConfig).metadataRoot).toBe("");
+  });
+
+  it("refuses an absolute root, naming what is wrong with it", () => {
+    const env = { ...baseEnv(), APP_STORE_CONNECT_METADATA_ROOT: "/etc/metadata" };
+    expect(() => loadConfig(env, noConfig)).toThrow(/absolute/i);
+  });
+
+  it("refuses a root containing ..", () => {
+    const env = { ...baseEnv(), APP_STORE_CONNECT_METADATA_ROOT: "a/../b" };
+    expect(() => loadConfig(env, noConfig)).toThrow(/plain relative path/i);
   });
 });
 
