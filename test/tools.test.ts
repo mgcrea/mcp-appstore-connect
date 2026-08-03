@@ -77,6 +77,7 @@ describe("tool registration", () => {
       "app_store_connect_list_app_infos",
       "app_store_connect_list_app_info_localizations",
       "app_store_connect_get_app_info_localization",
+      "app_store_connect_get_age_rating_declaration",
       "app_store_connect_export_listing",
       "app_store_connect_list_screenshot_sets",
       "app_store_connect_list_screenshots",
@@ -109,6 +110,7 @@ describe("tool registration", () => {
       "app_store_connect_submit_version_for_review",
       "app_store_connect_cancel_review_submission",
       "app_store_connect_update_app_info_localization",
+      "app_store_connect_update_age_rating_declaration",
       "app_store_connect_apply_listing",
       "app_store_connect_upload_screenshot",
       "app_store_connect_delete_screenshot",
@@ -353,6 +355,89 @@ describe("set_version_build", () => {
 
     expect(result.isError).toBe(true);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("age rating declaration", () => {
+  const APP_INFO_ID = "63998931-e8e1-440e-b295-e2f37df48917";
+  const DECLARATION_ID = "a1b2c3d4-0000-4000-8000-000000000001";
+
+  const routed = (): ReturnType<typeof vi.fn> =>
+    vi.fn(async () =>
+      jsonResponse({
+        data: {
+          id: DECLARATION_ID,
+          type: "ageRatingDeclarations",
+          attributes: { socialMedia: null, userGeneratedContent: false },
+        },
+      }),
+    );
+
+  const callTool = async (
+    name: string,
+    args: Record<string, unknown>,
+    fetchImpl: ReturnType<typeof vi.fn>,
+  ): ReturnType<Client["callTool"]> => {
+    const client = await connect(
+      { ...baseConfig, allowWrites: true },
+      fetchImpl as unknown as typeof fetch,
+    );
+    return client.callTool({ name, arguments: args });
+  };
+
+  it("reads the declaration through appInfos, not appStoreVersions", async () => {
+    const fetchImpl = routed();
+
+    const result = await callTool(
+      "app_store_connect_get_age_rating_declaration",
+      { appInfoId: APP_INFO_ID },
+      fetchImpl,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(callArgs(fetchImpl)[0]).toBe(
+      `https://api.appstoreconnect.apple.com/v1/appInfos/${APP_INFO_ID}/ageRatingDeclaration`,
+    );
+    // The id the update tool takes has to survive the summarizer.
+    expect((result.content as { text: string }[])[0]?.text ?? "").toContain(DECLARATION_ID);
+  });
+
+  it("patches only the answers it was given", async () => {
+    const fetchImpl = routed();
+
+    const result = await callTool(
+      "app_store_connect_update_age_rating_declaration",
+      { declarationId: DECLARATION_ID, socialMedia: false },
+      fetchImpl,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const patch = patchCall(fetchImpl);
+    expect(patch?.[0]).toBe(
+      `https://api.appstoreconnect.apple.com/v1/ageRatingDeclarations/${DECLARATION_ID}`,
+    );
+    expect(JSON.parse(String(patch?.[1].body))).toEqual({
+      data: {
+        id: DECLARATION_ID,
+        type: "ageRatingDeclarations",
+        attributes: { socialMedia: false },
+      },
+    });
+  });
+
+  it("sends a null kidsAgeBand rather than dropping it", async () => {
+    const fetchImpl = routed();
+
+    const result = await callTool(
+      "app_store_connect_update_age_rating_declaration",
+      { declarationId: DECLARATION_ID, kidsAgeBand: null },
+      fetchImpl,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(String(patchCall(fetchImpl)?.[1].body)).data.attributes).toEqual({
+      kidsAgeBand: null,
+    });
   });
 });
 
