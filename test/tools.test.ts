@@ -78,6 +78,15 @@ const deleteCall = (fetchImpl: ReturnType<typeof vi.fn>): [string, RequestInit] 
 const textOf = (result: Awaited<ReturnType<Client["callTool"]>>): string =>
   (result.content as { text: string }[])[0]?.text ?? "";
 
+/**
+ * The parsed tool payload. Prefer this over matching `textOf` against a
+ * serialized spelling: an assertion on `'"created": true'` pins the formatting
+ * of the response rather than its content, and breaks the moment ok() stops
+ * pretty-printing.
+ */
+const payloadOf = (result: Awaited<ReturnType<Client["callTool"]>>): Record<string, unknown> =>
+  JSON.parse(textOf(result) || "{}") as Record<string, unknown>;
+
 /** One draft submission item, linked to a version by relationship. */
 const submissionItemFor = (versionId: string): unknown => ({
   id: "item-1",
@@ -2959,7 +2968,7 @@ describe("in-app purchase availability", () => {
     );
 
     expect(result.isError).toBeFalsy();
-    expect((result.content as { text: string }[])[0]?.text ?? "").toContain('"data": null');
+    expect(payloadOf(result).data).toBeNull();
   });
 
   it("resolves every territory when none are named", async () => {
@@ -3096,7 +3105,7 @@ describe("submission prerequisites", () => {
       );
 
       expect(result.isError).toBeFalsy();
-      expect(textOf(result)).toContain('"created": true');
+      expect(payloadOf(result).created).toBe(true);
 
       const post = postCall(fetchImpl, "/v1/appStoreReviewDetails");
       expect(post).toBeDefined();
@@ -3122,7 +3131,7 @@ describe("submission prerequisites", () => {
       );
 
       expect(result.isError).toBeFalsy();
-      expect(textOf(result)).toContain('"created": false');
+      expect(payloadOf(result).created).toBe(false);
       expect(postCall(fetchImpl, "/v1/appStoreReviewDetails")).toBeUndefined();
 
       const patch = patchCall(fetchImpl);
@@ -3314,7 +3323,7 @@ describe("submission prerequisites", () => {
       expect(result.isError).toBeFalsy();
       // The response is relationships only, so the echoed price is the caller's
       // only confirmation of which amount landed.
-      expect(textOf(result)).toContain('"customerPrice": "0.00"');
+      expect((payloadOf(result).priced as Record<string, unknown>).customerPrice).toBe("0.00");
 
       const post = postCall(fetchImpl, "/v1/appPriceSchedules");
       const body = bodyOf(post?.[1]);

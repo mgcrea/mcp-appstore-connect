@@ -8,8 +8,14 @@ export type ToolResult = {
   isError?: boolean;
 };
 
+/**
+ * Compact, not pretty-printed. `null, 2` adds 19-41% to every response — worst
+ * on wide lists of short-keyed objects, which are exactly the replies already
+ * big enough to hurt. No model needs the indentation, and every tool returns
+ * through here. Files written to disk for humans stay pretty.
+ */
 export const ok = (data: unknown): ToolResult => ({
-  content: [{ type: "text", text: JSON.stringify(data ?? { ok: true }, null, 2) }],
+  content: [{ type: "text", text: JSON.stringify(data ?? { ok: true }) }],
 });
 
 /**
@@ -24,7 +30,7 @@ export const fail = (message: string, extra?: unknown): ToolResult => ({
   content: [
     {
       type: "text",
-      text: JSON.stringify({ error: message, ...(extra ? { details: extra } : {}) }, null, 2),
+      text: JSON.stringify({ error: message, ...(extra ? { details: extra } : {}) }),
     },
   ],
   isError: true,
