@@ -7,9 +7,9 @@ import {
   flattenAssociatedErrors,
   formatAssociatedError,
 } from "#/client/errors";
+import { buildQuery, safeJsonParse, withRetry, type Query } from "#/client/http";
 
-export type QueryValue = string | number | boolean | string[] | undefined;
-export type Query = Record<string, QueryValue>;
+export type { Query, QueryValue } from "#/client/http";
 
 export type RequestOptions = {
   query?: Query;
@@ -27,83 +27,8 @@ export type AscClientOptions = {
 
 const DEFAULT_BASE_URL = "https://api.appstoreconnect.apple.com";
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
-const backoffMs = (attempt: number): number => Math.min(1000 * 2 ** attempt, 8000);
-
-const retryAfterMs = (res: Response): number | undefined => {
-  const header = res.headers.get("Retry-After");
-  if (header === null) return undefined;
-  const seconds = Number(header);
-  return Number.isFinite(seconds) ? Math.max(seconds, 0) * 1000 : undefined;
-};
-
-const safeJsonParse = (text: string): unknown => {
-  try {
-    return text ? JSON.parse(text) : undefined;
-  } catch {
-    return text;
-  }
-};
-
-/**
- * App Store Connect takes bracketed sparse-fieldset and filter params
- * (`fields[apps]=name,bundleId`, `filter[bundleId]=com.acme`). Array values are
- * joined with commas — that's the JSON:API convention Apple expects, NOT
- * repeated keys. The bracketed keys pass through URLSearchParams literally.
- */
-const buildQuery = (query: Query | undefined): string => {
-  if (!query) return "";
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(query)) {
-    if (value === undefined) continue;
-    params.append(key, Array.isArray(value) ? value.join(",") : String(value));
-  }
-  const qs = params.toString();
-  return qs ? `?${qs}` : "";
-};
-
-type RetryPolicy = {
-  maxRetries: number;
-  /** Prefix for the debug/warn lines, e.g. `GET https://…` or `PUT asset part 1/2`. */
-  label: string;
-  logger?: Logger | undefined;
-  /**
-   * Invoked before retrying a 401. Omitted for Apple's pre-signed upload URLs,
-   * where a 401/403 means the URL expired and reminting the JWT cannot help.
-   */
-  onUnauthorized?: (() => void) | undefined;
-};
-
-/** Run `perform` until it yields a non-retryable response or the budget runs out. */
-const withRetry = async (
-  perform: () => Promise<Response>,
-  policy: RetryPolicy,
-): Promise<Response> => {
-  let attempt = 0;
-
-  for (;;) {
-    policy.logger?.debug?.(`[appstore-connect] ${policy.label} (attempt ${attempt + 1})`);
-    const res = await perform();
-
-    if (res.status === 401 && policy.onUnauthorized && attempt < policy.maxRetries) {
-      policy.logger?.warn?.(`[appstore-connect] HTTP 401 — reminting token and retrying`);
-      policy.onUnauthorized();
-      attempt += 1;
-      continue;
-    }
-
-    if ((res.status === 429 || res.status >= 500) && attempt < policy.maxRetries) {
-      const delay = retryAfterMs(res) ?? backoffMs(attempt);
-      policy.logger?.warn?.(`[appstore-connect] HTTP ${res.status} — retrying in ${delay}ms`);
-      await sleep(delay);
-      attempt += 1;
-      continue;
-    }
-
-    return res;
-  }
-};
+/** Log prefix for this client's retry lines. */
+const TAG = "[appstore-connect]";
 
 /**
  * Analytics report segments are served from a blob store rather than the API
@@ -194,6 +119,7 @@ export class AppStoreConnectClient {
       {
         maxRetries: this.maxRetries,
         label: `${method} ${url}`,
+        tag: TAG,
         logger: this.logger,
         onUnauthorized: () => this.tokenProvider.invalidate(),
       },
@@ -247,7 +173,7 @@ export class AppStoreConnectClient {
       const url = op.url;
       const res = await withRetry(
         () => this.fetchImpl(url, { method: op.method ?? "PUT", headers, body: chunk }),
-        { maxRetries: this.maxRetries, label: `PUT asset ${part}`, logger: this.logger },
+        { maxRetries: this.maxRetries, label: `PUT asset ${part}`, tag: TAG, logger: this.logger },
       );
 
       if (!res.ok) {
@@ -332,6 +258,7 @@ export class AppStoreConnectClient {
       {
         maxRetries: this.maxRetries,
         label: `GET ${parsed.origin}${parsed.pathname}`,
+        tag: TAG,
         logger: this.logger,
       },
     );
