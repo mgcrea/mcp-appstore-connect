@@ -300,6 +300,31 @@ strings "$BIN" | grep -c 'Unlock Pro'   # the new string is in
 strings "$BIN" | grep '4\.99'           # the old one is gone (expect no output)
 ```
 
+### If the app syncs with CloudKit, deploy the schema before archiving
+
+**A new SwiftData/Core Data field does not reach Production on its own.**
+`NSPersistentCloudKitContainer` creates record types and fields in the **Development**
+environment only — it has no ability to alter Production and it does not report that it
+did nothing. Ship a build using a field that Production has never heard of and the app
+saves it locally, syncs every other field, and drops that one silently. Nothing surfaces
+to the user: the record arrives on the second device with the attribute at its default.
+
+This bites on the first model change _after_ the first ship, because a TestFlight build is
+what creates Production in the first place. Before archiving:
+
+1. Run a **Debug** build once, so a client actually writes the field and it appears in the
+   Console. There is nothing to deploy until one has.
+2. CloudKit Console ▸ the container ▸ **Deploy Schema Changes**, Development → Production.
+
+Production is additive-only, forever: a new record type or a new optional/defaulted
+attribute is fine, removing or renaming or retyping one is not — a rename is an add plus a
+dead field. So every added attribute needs a default that means "as it was before", which
+is also what makes old clients safe. They ignore a field they have never heard of, and
+records they write arrive with it absent and pick up that default.
+
+Grep the diff for `@Model` / `NSManagedObject` changes since the last shipped tag before
+deciding this does not apply.
+
 ### Credentials
 
 An ASC API key is usually already on the machine, in one of two places:
@@ -367,9 +392,29 @@ preflight says rebuild first, `app_store_connect_remove_version_from_submission`
 back to `PREPARE_FOR_SUBMISSION`; `cancel_review_submission` cannot do it, because the
 draft has never been with Apple.
 
-Approval is not release. A version created with `releaseType: MANUAL` sits in
-`PENDING_DEVELOPER_RELEASE` until someone releases it, which is usually what you want:
-it keeps the release moment under the user's control.
+**Create versions with `releaseType: AFTER_APPROVAL` unless the user asks to hold the
+release.** Apple then ships the version the moment review passes, and nothing waits on a
+button someone has to remember to press:
+
+```
+app_store_connect_create_version { appId, versionString, platform, releaseType: "AFTER_APPROVAL" }
+app_store_connect_update_version { versionId, releaseType: "AFTER_APPROVAL" }
+```
+
+`create_version` already defaults to `AFTER_APPROVAL` when the field is omitted, so what
+actually produces a `MANUAL` version is something setting it explicitly — a `Scripts/`
+release helper, a fastlane lane, or an older habit. Check that path when versions keep
+landing in `PENDING_DEVELOPER_RELEASE`. An existing version can be flipped with
+`update_version` while it is still `PREPARE_FOR_SUBMISSION`.
+
+Reach for `MANUAL` only when the release moment is itself the point: a launch tied to an
+announcement, or a coordinated push across several apps. For a dated launch prefer
+`SCHEDULED` with an `earliestReleaseDate`, which expresses the intent without depending on
+anyone being at a keyboard.
+
+Approval is not release for those. A `MANUAL` version sits in `PENDING_DEVELOPER_RELEASE`
+until someone releases it, and versions parked there are easy to forget across several
+apps — which is why it is no longer the default.
 
 ### Release
 
@@ -382,10 +427,11 @@ Only for a version already in `PENDING_DEVELOPER_RELEASE` — `AFTER_APPROVAL` a
 `READY_FOR_SALE` a moment after the request, so re-read it with `list_versions` rather than
 trusting the response.
 
-**Ask before releasing, every time.** The whole point of `MANUAL` is that a human picks the
-moment, so a release the user did not ask for in this turn overrides the choice they already
-made. It is also effectively irreversible: pulling a released version means removing the app
-from sale.
+**Ask before pressing release, every time.** A version only sits in
+`PENDING_DEVELOPER_RELEASE` because someone chose `MANUAL` for it, so releasing it without
+being asked in this turn overrides that choice. It is also effectively irreversible:
+pulling a released version means removing the app from sale. This step stays manual even
+though `AFTER_APPROVAL` is the default everywhere else.
 
 ### Submitting from a dirty tree
 
