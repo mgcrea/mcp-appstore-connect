@@ -2,7 +2,7 @@
   "name": "appstore-toolkit",
   "displayName": "App Store toolkit",
   "description": "Ship an Xcode app to the App Store and see how it does: write the CHANGELOG entry and every App Store Connect metadata field, round-trip the listing, and analyze downloads, sales and conversion once it is live.",
-  "version": "0.22.2",
+  "version": "0.22.4",
   "author": {
     "name": "Olivier Louvignes",
     "url": "https://github.com/mgcrea"

@@ -1,6 +1,6 @@
 {
   "name": "@mgcrea/mcp-appstore-connect",
-  "version": "0.22.3",
+  "version": "0.22.4",
   "description": "Model Context Protocol server for the Apple App Store Connect API",
   "keywords": [
     "app-store-connect",
