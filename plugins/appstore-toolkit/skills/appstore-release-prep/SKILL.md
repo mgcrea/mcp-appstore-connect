@@ -322,6 +322,15 @@ dead field. So every added attribute needs a default that means "as it was befor
 is also what makes old clients safe. They ignore a field they have never heard of, and
 records they write arrive with it absent and pick up that default.
 
+The Console is not the only way to do step 2. `@mgcrea/mcp-cloudkit` — a separate server
+from this one, with its own token, because CloudKit's schema API has nothing to do with
+App Store Connect's — covers the same ground scriptably: `cloudkit_list_record_types`
+confirms a field actually reached Development, `cloudkit_diff_schema` shows what deploying
+would change, and `cloudkit_deploy_schema` fetches that diff before promoting it, which is
+the Console's safety property carried through rather than skipped. Reach for the Console
+when it is a one-off; reach for the server when this needs to happen unattended or you want
+the diff in a transcript.
+
 Grep the diff for `@Model` / `NSManagedObject` changes since the last shipped tag before
 deciding this does not apply.
 
