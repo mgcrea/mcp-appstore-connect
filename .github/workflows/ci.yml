@@ -42,6 +42,25 @@ jobs:
         run: pnpm run test
       - name: Build 📦
         run: pnpm run build
+      # Every client config in the wild spells this server `npx -y <package>`,
+      # and npx picks the bin by name: it only forgives a mismatch while the
+      # package ships exactly one. So the day a second bin is added, that
+      # command starts failing with "could not determine executable to run" —
+      # at the client, with stderr swallowed, long after CI was green. Mirrors
+      # npm's own getBinFromManifest, so it fails here first instead.
+      - name: npx can resolve a bin 🔒
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            const bin = pkg.bin ?? {};
+            const unscoped = pkg.name.slice(pkg.name.indexOf('/') + 1);
+            if (new Set(Object.values(bin)).size > 1 && !bin[unscoped]) {
+              console.error('npx cannot pick a bin for ' + pkg.name + ': none of [' +
+                Object.keys(bin).join(', ') + '] is named ' + unscoped + '.');
+              console.error('Add a ' + unscoped + ' alias pointing at the server entry point.');
+              process.exit(1);
+            }
+          "
       # The tool list is the server's public contract and is easy to change by
       # accident. Run with NO credentials: the server must still speak MCP over
       # stdio and answer tools/list. A server that exits here shows in the client
