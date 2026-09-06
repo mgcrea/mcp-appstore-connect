@@ -4,6 +4,12 @@ import { z } from "zod";
 import type { AppStoreConnectClient } from "#/client/asc";
 import { AppStoreConnectApiError } from "#/client/errors";
 import { attributesOf, type Rec, resourcesOf, summarizeResponse } from "#/client/shape";
+import {
+  classifyByCalendar,
+  type Confidence,
+  type EmptyReason,
+  periodSpan,
+} from "#/reports/period";
 import type { ToolContext } from "#/tools/index";
 import {
   appIdArg,
@@ -552,25 +558,145 @@ const withVendorHint = async <T>(vendor: string, fn: () => Promise<T>): Promise<
  * granularity at all, so telling their caller to "re-ask at DAILY" names an
  * argument that tool does not have.
  */
-const withEmptyPeriodHint = async <T>(
-  period: string,
-  remedy: string,
-  fn: () => Promise<T>,
-): Promise<T> => {
+type EmptyPeriod = {
+  empty: true;
+  reason: EmptyReason;
+  confidence: Confidence;
+  period: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+  note: string;
+  remedy: string;
+};
+
+/**
+ * Run a report download, turning Apple's empty-period 404 into a result rather
+ * than an error.
+ *
+ * "The month had no sales" is a successful measurement, and an agent branches on
+ * a result while it retries or gives up on an error — which is the understated
+ * month arriving by another route. It is also already the house pattern:
+ * `getOrNull` turns a 404-means-not-configured into null, `get_vendor_number`
+ * reports an unreadable vendor as a success, `get_analytics_status` answers "no
+ * data yet" with `instances: 0`. This 404 was the one place it was not applied.
+ *
+ * The quiet failure mode of that change is a caller who forgets to check
+ * `empty` and reads zero rows as a real zero, so the empty result carries no
+ * `report`, `lines` or `dataRows` key at all: reaching for rows gets undefined
+ * and fails loudly rather than summing an empty string.
+ */
+const downloadOrEmpty = async (
+  fn: () => Promise<string>,
+  onEmpty: (err: AppStoreConnectApiError) => Promise<EmptyPeriod>,
+): Promise<string | EmptyPeriod> => {
   try {
     return await fn();
   } catch (err) {
-    if (err instanceof AppStoreConnectApiError && err.status === 404) {
-      throw new AppStoreConnectApiError(
-        `Apple returned no rows for ${period}. This is how it reports a period with no ` +
-          `activity — including dates before the app shipped — so it is an answer, not a ` +
-          `fault, and the vendor number and credentials are fine. ${remedy} ` +
-          `Original: ${err.message}`,
-        { status: err.status, errors: err.errors },
-      );
-    }
+    if (err instanceof AppStoreConnectApiError && err.status === 404) return onEmpty(err);
     throw err;
   }
+};
+
+/** The sentence every empty-period result opens with, whatever settled it. */
+const emptyNote = (period: string): string =>
+  `Apple returned no rows for ${period}. A 404 is how it reports both a period with no ` +
+  `activity and a period it has not assembled yet, so the reason below says which — read it ` +
+  `before recording a zero.`;
+
+/**
+ * What a 404 on a sales report means, from the calendar alone.
+ *
+ * Most of the answer costs no request. The dangerous case the old prose asked
+ * the caller to check by hand — a week that just ended and 404s while its days
+ * have sales — is `WITHIN_GENERATION_LAG`, settled here for free. Only a period
+ * that ended well past the lag and still 404s is genuinely ambiguous, and that
+ * is rare.
+ */
+const emptySalesPeriod = async (
+  frequency: (typeof FREQUENCIES)[number],
+  reportDate: string,
+  now: Date,
+): Promise<EmptyPeriod> => {
+  const span = periodSpan(frequency, reportDate);
+  const calendar = classifyByCalendar(frequency, reportDate, now);
+  const period = compact({
+    frequency,
+    reportDate,
+    start: span?.start,
+    end: span?.end,
+    daysInPeriod: span?.days.length,
+  });
+
+  if (calendar !== undefined) {
+    return {
+      empty: true,
+      reason: calendar.reason,
+      confidence: calendar.confidence,
+      period,
+      evidence: { endedDaysAgo: calendar.endedDaysAgo, requests: 1 },
+      note: emptyNote(`${frequency} ${reportDate}`),
+      remedy: CALENDAR_REMEDY[calendar.reason] ?? SALES_EMPTY_REMEDY,
+    };
+  }
+
+  // Old enough that the calendar cannot settle it. Until the probe lands, say
+  // so rather than guessing — an UNDETERMINED that reads as a zero is the whole
+  // failure this replaces.
+  return {
+    empty: true,
+    reason: "UNDETERMINED",
+    confidence: "none",
+    period,
+    evidence: { requests: 1 },
+    note: emptyNote(`${frequency} ${reportDate}`),
+    remedy: SALES_EMPTY_REMEDY,
+  };
+};
+
+/**
+ * The same for finance, which can honestly say much less.
+ *
+ * Never NO_ROWS and never NOT_YET_GENERATED: dating a finance report that does
+ * not exist would need Apple's 4-4-5 fiscal calendar modelled, and this file
+ * deliberately refuses to do that — `financeCoverage` reads the dates out of the
+ * report precisely so it never has to guess. Adding a fiscal calendar solely to
+ * date a report that is not there would invent the certainty this change exists
+ * to remove.
+ */
+const emptyFinancePeriod = async (
+  reportDate: string,
+  regionCode: string,
+): Promise<EmptyPeriod> => ({
+  empty: true,
+  reason: "UNDETERMINED",
+  confidence: "none",
+  period: {
+    requestedFiscalPeriod: reportDate,
+    regionCode,
+    // Null rather than absent: nobody should read "calendar July was zero" out
+    // of "fiscal 2026-07 returned nothing".
+    coverage: null,
+  },
+  evidence: { requests: 1 },
+  note: emptyNote(`fiscal ${reportDate} in region ${regionCode}`),
+  remedy: FINANCE_EMPTY_REMEDY,
+});
+
+/**
+ * What to do about a reason the calendar settled on its own. Each is specific:
+ * a generic "check the dailies" would send the caller probing a period Apple has
+ * not finished counting, which cannot answer anything.
+ */
+const CALENDAR_REMEDY: Partial<Record<EmptyReason, string>> = {
+  FUTURE_PERIOD:
+    "This period has not started yet, so there is nothing to report and this is not a zero. " +
+    "Check the date you asked for.",
+  WITHIN_GENERATION_LAG:
+    "This period ended too recently for Apple to have assembled it — weekly and monthly reports " +
+    "are built after the dailies they roll up. It is reporting lag, NOT a zero, and must not be " +
+    "recorded as one. Re-ask in a few days, or read the DAILY reports across the same span now.",
+  BEYOND_RETENTION:
+    "This period is older than Apple serves sales reports for, so its absence says nothing about " +
+    "sales. If you have the figures, they came from a report downloaded at the time.",
 };
 
 /** Sales reports roll up from the dailies, so a finer granularity settles it. */
@@ -837,17 +963,26 @@ export const registerReportTools = (
     }) =>
       wrap(async () => {
         const vendor = requireVendor(vendorNumber, ctx.vendorNumber);
-        const tsv = await withVendorHint(vendor, () =>
-          withEmptyPeriodHint(`${frequency} ${reportDate}`, SALES_EMPTY_REMEDY, () =>
-            client.downloadReport("/v1/salesReports", {
-              "filter[frequency]": frequency,
-              "filter[reportType]": reportType,
-              "filter[reportSubType]": reportSubType,
-              "filter[vendorNumber]": vendor,
-              "filter[reportDate]": reportDate,
-            }),
+        const outcome = await withVendorHint(vendor, () =>
+          downloadOrEmpty(
+            () =>
+              client.downloadReport("/v1/salesReports", {
+                "filter[frequency]": frequency,
+                "filter[reportType]": reportType,
+                "filter[reportSubType]": reportSubType,
+                "filter[vendorNumber]": vendor,
+                "filter[reportDate]": reportDate,
+              }),
+            () => emptySalesPeriod(frequency, reportDate, new Date()),
           ),
         );
+        if (typeof outcome !== "string") {
+          // No file is written for an empty period. A header-only file would
+          // trip report_stats.py's own empty check, relocating the bug rather
+          // than answering it.
+          return savePath === undefined ? outcome : { ...outcome, saved: null };
+        }
+        const tsv = outcome;
 
         if (appleIdentifier === undefined && sku === undefined) {
           return previewAndSave(tsv, maxLines, savePath);
@@ -919,10 +1054,8 @@ export const registerReportTools = (
     async ({ reportDate, regionCode, vendorNumber, maxLines, savePath }) =>
       wrap(async () => {
         const vendor = requireVendor(vendorNumber, ctx.vendorNumber);
-        const tsv = await withVendorHint(vendor, () =>
-          withEmptyPeriodHint(
-            `fiscal ${reportDate} in region ${regionCode}`,
-            FINANCE_EMPTY_REMEDY,
+        const outcome = await withVendorHint(vendor, () =>
+          downloadOrEmpty(
             () =>
               client.downloadReport("/v1/financeReports", {
                 "filter[regionCode]": regionCode,
@@ -930,8 +1063,13 @@ export const registerReportTools = (
                 "filter[vendorNumber]": vendor,
                 "filter[reportDate]": reportDate,
               }),
+            () => emptyFinancePeriod(reportDate, regionCode),
           ),
         );
+        if (typeof outcome !== "string") {
+          return savePath === undefined ? outcome : { ...outcome, saved: null };
+        }
+        const tsv = outcome;
 
         // The dates the report covers are in the report, so the fiscal-vs-calendar
         // question is answered from the data rather than from the caller's memory

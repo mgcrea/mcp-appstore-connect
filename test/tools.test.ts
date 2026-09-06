@@ -1947,20 +1947,124 @@ describe("reports require a vendor number", () => {
       fetchImpl as unknown as typeof fetch,
     );
 
+    // Only Date is faked, so timers and promises behave normally. The verdict is
+    // a statement about how long ago the period ended, so it has to be read
+    // against a fixed clock or it decays into a different answer next month.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-11T09:00:00Z"));
     const result = await client.callTool({
       name: "app_store_connect_download_sales_report",
       arguments: { reportDate: "2026-08-09", frequency: "WEEKLY", vendorNumber: "85326407" },
     });
+    vi.useRealTimers();
 
-    expect(result.isError).toBe(true);
-    const text = (result.content as { text: string }[])[0]?.text ?? "";
-    // Names the period asked for, so the message is not generic.
-    expect(text).toContain("WEEKLY 2026-08-09");
-    // Says this is an answer, and clears the credentials it would otherwise implicate.
-    expect(text).toContain("not a fault");
-    // The disambiguation that stops a lag being written down as zero.
-    expect(text).toContain("DAILY");
-    expect(text).toContain("must not be reported as zero");
+    // An empty period is a measurement, not a fault. An agent branches on a
+    // result; on an error it retries or gives up and reports "I could not get
+    // the data", which is the understated month arriving another way.
+    expect(result.isError).toBeFalsy();
+    const body = payloadOf(result) as {
+      empty: boolean;
+      reason: string;
+      confidence: string;
+      period: Record<string, unknown>;
+      remedy: string;
+      note: string;
+    };
+
+    expect(body.empty).toBe(true);
+    // Settled from the calendar alone: the week ended two days before `now`, so
+    // Apple cannot have assembled it yet. No extra request was spent.
+    expect(body.reason).toBe("WITHIN_GENERATION_LAG");
+    expect(body.confidence).toBe("proven");
+    expect(fetchImpl.mock.calls).toHaveLength(1);
+    // The span is stated rather than left for the caller to work out.
+    expect(body.period).toMatchObject({
+      frequency: "WEEKLY",
+      reportDate: "2026-08-09",
+      start: "2026-08-03",
+      end: "2026-08-09",
+      daysInPeriod: 7,
+    });
+    expect(body.remedy).toContain("must not be");
+    expect(body.note).toContain("WEEKLY 2026-08-09");
+
+    // The guard against the quiet failure of returning a success: a consumer
+    // reaching for rows must get undefined, never an empty report to total.
+    expect(body).not.toHaveProperty("report");
+    expect(body).not.toHaveProperty("lines");
+    expect(body).not.toHaveProperty("dataRows");
+  });
+
+  it("reports a long-past period as undetermined rather than as a zero", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ errors: [] }), { status: 404 }),
+    );
+    const client = await connect(
+      { ...baseConfig, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_download_sales_report",
+        arguments: { reportDate: "2026-03", frequency: "MONTHLY", vendorNumber: "85326407" },
+      }),
+    ) as { reason: string; confidence: string };
+
+    // Old enough that the calendar cannot settle it. Saying so beats guessing;
+    // an UNDETERMINED that reads as a zero is the failure being replaced.
+    expect(body.reason).toBe("UNDETERMINED");
+    expect(body.confidence).toBe("none");
+  });
+
+  it("refuses to record a period that has not started", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ errors: [] }), { status: 404 }),
+    );
+    const client = await connect(
+      { ...baseConfig, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_download_sales_report",
+        arguments: { reportDate: "2099-01-01", frequency: "DAILY", vendorNumber: "85326407" },
+      }),
+    ) as { reason: string; remedy: string };
+
+    expect(body.reason).toBe("FUTURE_PERIOD");
+    expect(body.remedy).toContain("has not started");
+  });
+
+  it("writes no file for an empty period", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "asc-empty-"));
+    const savePath = join(dir, "sales.tsv");
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ errors: [] }), { status: 404 }),
+    );
+    const client = await connect(
+      { ...baseConfig, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_download_sales_report",
+        arguments: {
+          reportDate: "2026-08-09",
+          frequency: "WEEKLY",
+          vendorNumber: "85326407",
+          savePath,
+        },
+      }),
+    ) as { saved: null };
+
+    // A header-only file would trip report_stats.py's own empty check, which
+    // relocates the problem instead of answering it.
+    expect(body.saved).toBeNull();
+    await expect(readFile(savePath, "utf8")).rejects.toThrow();
+    await rm(dir, { recursive: true, force: true });
   });
 });
 
@@ -2062,15 +2166,28 @@ describe("download_finance_report", () => {
       arguments: { reportDate: "2026-07", regionCode: "US", vendorNumber: VENDOR },
     });
 
-    expect(result.isError).toBe(true);
-    const text = textOf(result);
-    expect(text).toContain("fiscal 2026-07 in region US");
-    expect(text).toContain("not a fault");
+    expect(result.isError).toBeFalsy();
+    const body = payloadOf(result) as {
+      empty: boolean;
+      reason: string;
+      period: Record<string, unknown>;
+      note: string;
+      remedy: string;
+    };
+
+    expect(body.empty).toBe(true);
+    expect(body.note).toContain("fiscal 2026-07 in region US");
+    // Finance can never claim a proven zero: dating a report that does not exist
+    // would need Apple's 4-4-5 calendar modelled, which this file refuses to do.
+    expect(body.reason).toBe("UNDETERMINED");
+    expect(body.reason).not.toBe("NO_ROWS");
+    // Null, not absent, so nobody reads "calendar July was zero" out of this.
+    expect(body.period).toMatchObject({ requestedFiscalPeriod: "2026-07", coverage: null });
     // The checks that do apply here: publication lag, region, fiscal calendar.
-    expect(text).toContain("regionCode ZZ");
-    expect(text).toContain("4-4-5");
+    expect(body.remedy).toContain("regionCode ZZ");
+    expect(body.remedy).toContain("4-4-5");
     // And not the one that does not.
-    expect(text).not.toContain("DAILY");
+    expect(JSON.stringify(body)).not.toContain("DAILY");
   });
 });
 

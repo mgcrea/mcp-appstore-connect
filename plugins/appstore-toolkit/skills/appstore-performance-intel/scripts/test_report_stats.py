@@ -147,5 +147,42 @@ class ReadReportTest(unittest.TestCase):
         self.assertTrue(truncated)
 
 
+class EmptyPeriodTest(unittest.TestCase):
+    """An empty period is a result, not a report. It must not parse as either a
+    table or a generic 'no report key' failure -- the caller has to learn
+    WHETHER it is a zero, since that is the whole point of the reason field."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="report-stats-empty-")
+
+    def dump(self, blob):
+        path = os.path.join(self.dir, "d.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(blob, fh)
+        return path
+
+    def test_unproven_empty_says_do_not_record_zero(self):
+        path = self.dump({
+            "empty": True, "reason": "WITHIN_GENERATION_LAG",
+            "confidence": "proven", "remedy": "Re-ask in a few days.",
+        })
+        with self.assertRaises(ReportError) as ctx:
+            read_report(path)
+        self.assertIn("NOT established as a zero", str(ctx.exception))
+        self.assertIn("WITHIN_GENERATION_LAG", str(ctx.exception))
+
+    def test_proven_zero_says_record_it_as_zero(self):
+        path = self.dump({"empty": True, "reason": "NO_ROWS", "confidence": "proven"})
+        with self.assertRaises(ReportError) as ctx:
+            read_report(path)
+        self.assertIn("real zero", str(ctx.exception))
+
+    def test_does_not_fall_through_to_the_no_report_key_message(self):
+        path = self.dump({"empty": True, "reason": "UNDETERMINED"})
+        with self.assertRaises(ReportError) as ctx:
+            read_report(path)
+        self.assertNotIn("no 'report' key", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

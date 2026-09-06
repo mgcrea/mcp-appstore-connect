@@ -340,14 +340,23 @@ stopping when one holds:
    purchases? Did a price change move proceeds without moving units?
 5. **Apple's own reporting.** Late-arriving corrections, an empty date, a
    changed report shape — and a period that reads as zero because it was never
-   generated. `download_sales_report` answers a period with no rows as an
-   **HTTP 404**, `NOT_FOUND` / "There were no sales for the date specified". That
-   is Apple's empty answer, not a broken call, but it is also what a
-   not-yet-generated WEEKLY or MONTHLY looks like, and the two mean opposite
-   things. Separate them by asking a finer granularity for the same span: if the
-   WEEKLY 404s while DAILY reports inside that week return sales, the week is a
-   reporting lag and reporting it as zero would be flatly wrong. Only after the
-   dailies also come back empty is a zero real.
+   generated. Apple answers a period with no rows and a period it has not
+   assembled yet with the **same HTTP 404**, and the two mean opposite things.
+   You no longer have to tell them apart by hand: `download_sales_report`
+   returns `{"empty": true, "reason": …, "confidence": …}` instead of failing,
+   and the reason is the answer. Read it, do not re-derive it:
+
+   - `NO_ROWS` / `REGION_EMPTY` with `confidence: "proven"` — a real zero.
+     Record it as 0.
+   - `WITHIN_GENERATION_LAG`, `NOT_YET_GENERATED` — reporting lag. **Not** a
+     zero. Recording it as one understates the period.
+   - `NO_ROWS_OBSERVED`, `UNDETERMINED`, `BEYOND_RETENTION`, `FUTURE_PERIOD` —
+     nothing was established. Say the period is unmeasured rather than empty.
+
+   The `evidence` block says what was actually checked. Do not run your own
+   finer-granularity sweep to second-guess a `proven` verdict — the server
+   already did it, and re-running it spends a request per day for an answer you
+   have.
 
 If none of them holds, say the movement is unexplained. An honest "down 19% and
 I can't attribute it" is worth more than a confident guess, and it tells the

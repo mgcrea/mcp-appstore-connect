@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { classifyByCalendar, classifyProbe, periodSpan, stepDown } from "#/reports/period";
 import { previewReport } from "#/tools/reports";
 
 /**
@@ -157,5 +158,158 @@ describe("previewReport deprecated aliases", () => {
     expect(result.rows).toBeUndefined();
     expect(result.note).toBeUndefined();
     expect(result).toHaveProperty("truncated");
+  });
+});
+
+/**
+ * Apple answers "no rows" and "not assembled yet" with the same 404, and the two
+ * are opposite conclusions: one is a real zero, the other is reporting lag, and
+ * getting it backwards understates a month. Most of the distinction is available
+ * from the calendar for no requests at all, and these drive that half directly —
+ * a month-boundary off-by-one is invisible through a tool call and wrong by a
+ * whole day at the edges.
+ */
+describe("periodSpan", () => {
+  it("runs a weekly period backwards from its week-ending Sunday", () => {
+    // Apple keys a weekly report by the day it ENDS, so a naive forward span
+    // would name seven days that mostly have not happened.
+    expect(periodSpan("WEEKLY", "2026-08-09")).toMatchObject({
+      start: "2026-08-03",
+      end: "2026-08-09",
+    });
+    expect(periodSpan("WEEKLY", "2026-08-09")?.days).toHaveLength(7);
+  });
+
+  it("gets month lengths right, February included", () => {
+    expect(periodSpan("MONTHLY", "2026-02")?.days).toHaveLength(28);
+    expect(periodSpan("MONTHLY", "2024-02")?.days).toHaveLength(29); // leap year
+    expect(periodSpan("MONTHLY", "2026-01")?.days).toHaveLength(31);
+    expect(periodSpan("MONTHLY", "2026-04")?.days).toHaveLength(30);
+    expect(periodSpan("MONTHLY", "2026-12")).toMatchObject({
+      start: "2026-12-01",
+      end: "2026-12-31",
+    });
+  });
+
+  it("covers a day and a year", () => {
+    expect(periodSpan("DAILY", "2026-06-15")?.days).toEqual(["2026-06-15"]);
+    expect(periodSpan("YEARLY", "2026")?.days).toHaveLength(365);
+  });
+
+  it("returns nothing for a date that does not match its frequency", () => {
+    expect(periodSpan("MONTHLY", "2026-06-15")).toBeUndefined();
+    expect(periodSpan("DAILY", "2026-06")).toBeUndefined();
+    expect(periodSpan("MONTHLY", "2026-13")).toBeUndefined();
+  });
+});
+
+describe("stepDown", () => {
+  /** A year probed as 365 dailies is absurd; as 12 monthlies it is affordable. */
+  it("steps a year down to twelve months, not 365 days", () => {
+    const step = stepDown("YEARLY", "2026");
+    expect(step?.frequency).toBe("MONTHLY");
+    expect(step?.dates).toHaveLength(12);
+    expect(step?.dates[0]).toBe("2026-01");
+    expect(step?.dates[11]).toBe("2026-12");
+  });
+
+  it("steps weeks and months down to days", () => {
+    expect(stepDown("WEEKLY", "2026-08-09")?.dates).toHaveLength(7);
+    expect(stepDown("MONTHLY", "2026-02")?.dates).toHaveLength(28);
+  });
+
+  it("has nowhere to step a daily report down to", () => {
+    expect(stepDown("DAILY", "2026-06-15")).toBeUndefined();
+  });
+});
+
+describe("classifyByCalendar", () => {
+  const now = new Date("2026-08-11T09:00:00Z");
+
+  it("calls a period that has not started what it is", () => {
+    expect(classifyByCalendar("MONTHLY", "2026-12", now)?.reason).toBe("FUTURE_PERIOD");
+  });
+
+  /**
+   * The case that actually bit: a week that just ended 404s while every day
+   * inside it has sales. Settled here for zero extra requests.
+   */
+  it("calls a just-ended week reporting lag, not a zero", () => {
+    const verdict = classifyByCalendar("WEEKLY", "2026-08-09", now);
+    expect(verdict?.reason).toBe("WITHIN_GENERATION_LAG");
+    expect(verdict?.confidence).toBe("proven");
+    expect(verdict?.endedDaysAgo).toBe(2);
+  });
+
+  it("holds a daily report to a shorter lag than a weekly one", () => {
+    // Dailies appear about a day later; the coarse reports are built on top of
+    // them, so they trail further. One rule for both would be wrong twice.
+    expect(classifyByCalendar("DAILY", "2026-08-10", now)?.reason).toBe("WITHIN_GENERATION_LAG");
+    expect(classifyByCalendar("DAILY", "2026-08-08", now)).toBeUndefined();
+    expect(classifyByCalendar("WEEKLY", "2026-08-08", now)?.reason).toBe("WITHIN_GENERATION_LAG");
+  });
+
+  it("says nothing about a period older than Apple serves", () => {
+    const verdict = classifyByCalendar("DAILY", "2024-01-01", now);
+    expect(verdict?.reason).toBe("BEYOND_RETENTION");
+    // The retention window is an assumption, so it does not claim proof.
+    expect(verdict?.confidence).toBe("bounded");
+  });
+
+  /** The residue worth spending requests on — and it is deliberately narrow. */
+  it("declines to settle a period that is simply old enough to be a real zero", () => {
+    expect(classifyByCalendar("MONTHLY", "2026-06", now)).toBeUndefined();
+  });
+});
+
+describe("classifyProbe", () => {
+  it("treats one sub-period with rows as proof of lag", () => {
+    const verdict = classifyProbe(
+      [
+        { date: "2026-08-03", rows: 0 },
+        { date: "2026-08-04", rows: 41 },
+      ],
+      7,
+      "DAILY",
+    );
+
+    // One day with sales proves the week should exist, so it settles even though
+    // five days were never checked.
+    expect(verdict.reason).toBe("NOT_YET_GENERATED");
+    expect(verdict.confidence).toBe("proven");
+    expect(verdict.evidence).toMatchObject({ firstPeriodWithRows: "2026-08-04" });
+  });
+
+  it("only calls it a zero with full coverage and no unknowns", () => {
+    const days = Array.from({ length: 7 }, (_, i) => ({ date: `d${i}`, rows: 0 }));
+    const verdict = classifyProbe(days, 7, "DAILY");
+
+    expect(verdict.reason).toBe("NO_ROWS");
+    expect(verdict.confidence).toBe("proven");
+  });
+
+  /**
+   * The guard that keeps a bounded check from being read as a total. A transient
+   * Apple fault on one day must never turn into a manufactured zero.
+   */
+  it("refuses to call it a zero when a sub-period is unknown", () => {
+    const days = [
+      ...Array.from({ length: 6 }, (_, i) => ({ date: `d${i}`, rows: 0 as const })),
+      { date: "d6", rows: "unknown" as const },
+    ];
+    const verdict = classifyProbe(days, 7, "DAILY");
+
+    expect(verdict.reason).toBe("NO_ROWS_OBSERVED");
+    expect(verdict.reason).not.toBe("NO_ROWS");
+    expect(verdict.confidence).toBe("bounded");
+    expect(verdict.evidence).toMatchObject({ periodsUnknown: 1, periodsConfirmedEmpty: 6 });
+  });
+
+  it("refuses to call it a zero when the probe was cut short", () => {
+    const days = Array.from({ length: 5 }, (_, i) => ({ date: `d${i}`, rows: 0 }));
+    const verdict = classifyProbe(days, 31, "DAILY");
+
+    expect(verdict.reason).toBe("NO_ROWS_OBSERVED");
+    expect(verdict.evidence).toMatchObject({ periodsChecked: 5, periodsInSpan: 31 });
   });
 });

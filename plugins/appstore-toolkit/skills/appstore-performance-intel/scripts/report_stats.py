@@ -216,6 +216,23 @@ def read_report(path):
                 raise ReportError(
                     "This file holds a tool ERROR, not a report: %s" % blob.get("error")
                 )
+            # An empty period is a successful measurement with no report in it.
+            # Without this branch it raises "no 'report' key" -- a parse failure
+            # for a legitimate zero, which is the original bug one layer down.
+            if blob.get("empty"):
+                reason = blob.get("reason", "UNKNOWN")
+                confidence = blob.get("confidence", "none")
+                if reason in ("NO_ROWS", "REGION_EMPTY"):
+                    raise ReportError(
+                        "%s reports an EMPTY period (%s, %s). That is a real zero -- "
+                        "record it as 0, not as missing data. %s"
+                        % (path, reason, confidence, blob.get("remedy", ""))
+                    )
+                raise ReportError(
+                    "%s reports NO DATA for that period, and it is NOT established as a "
+                    "zero (reason=%s, confidence=%s). Do NOT record it as 0. %s"
+                    % (path, reason, confidence, blob.get("remedy", ""))
+                )
             if "report" not in blob:
                 raise ReportError(
                     "JSON input has no 'report' key. Save the whole tool result, "
