@@ -3563,6 +3563,57 @@ describe("certificates", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  // Both assertions describe protections the certificate path did not have
+  // before it moved onto the shared writer: it wrote a relative path wherever
+  // the server happened to be running, and said nothing about Docker mounts.
+  it("refuses a relative savePath", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(certResponse(true)));
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_download_certificate",
+      arguments: { certificateId: "cert-1", savePath: "devid.cer" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("absolute path");
+  });
+
+  it("names the Docker mount when the write fails", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "asc-certs-"));
+    const fetchImpl = vi.fn(async () => jsonResponse(certResponse(true)));
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    // The directory itself is not a writable file path.
+    const result = await client.callTool({
+      name: "app_store_connect_download_certificate",
+      arguments: { certificateId: "cert-1", savePath: dir },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Docker");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("reports the bytes it wrote alongside the path", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "asc-certs-"));
+    const savePath = join(dir, "devid.cer");
+    const fetchImpl = vi.fn(async () => jsonResponse(certResponse(true)));
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_download_certificate",
+        arguments: { certificateId: "cert-1", savePath },
+      }),
+    ) as { saved: { path: string; bytes: number; content: string }; savedTo: string };
+
+    expect(body.saved).toEqual({ path: savePath, bytes: 5, content: "binary" });
+    // The receipt cannot disagree with the file it describes.
+    expect(body.saved.bytes).toBe((await readFile(savePath)).byteLength);
+    // Deprecated alias, kept for 0.23 so existing callers keep resolving a path.
+    expect(body.savedTo).toBe(savePath);
+    await rm(dir, { recursive: true, force: true });
+  });
+
   it("refuses to revoke without an explicit confirm", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({}));
     const client = await connect(

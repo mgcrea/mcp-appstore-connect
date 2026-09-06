@@ -1,6 +1,3 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute } from "node:path";
-
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
@@ -8,7 +5,15 @@ import type { AppStoreConnectClient } from "#/client/asc";
 import { AppStoreConnectApiError } from "#/client/errors";
 import { attributesOf, type Rec, resourcesOf, summarizeResponse } from "#/client/shape";
 import type { ToolContext } from "#/tools/index";
-import { appIdArg, compact, limitArg, PreconditionError, wrap } from "#/tools/util";
+import {
+  appIdArg,
+  compact,
+  limitArg,
+  PreconditionError,
+  type SavedFile,
+  saveToPath,
+  wrap,
+} from "#/tools/util";
 
 const FREQUENCIES = ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"] as const;
 
@@ -141,33 +146,16 @@ const savePathArg = z
 const saveReport = async (
   path: string,
   text: string,
-): Promise<{ path: string; bytes: number; lines: number; dataRows: number }> => {
-  if (!isAbsolute(path)) {
-    throw new PreconditionError(
-      `\`savePath\` must be an absolute path (got "${path}") — this server's working directory ` +
-        `is not necessarily yours.`,
-      { savePath: path },
-    );
-  }
-  try {
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, text, "utf8");
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    throw new PreconditionError(
-      `Could not write the report to ${path} (${code ?? "unknown error"}). If this MCP server ` +
-        `runs in Docker the path must be INSIDE the container — mount the folder ` +
-        `(docker run -v /host/reports:/reports …) and pass the container path. Omitting ` +
-        `savePath returns the report inline instead.`,
-      { savePath: path, code },
-    );
-  }
+): Promise<SavedFile & { lines: number; dataRows: number }> => {
+  const written = await saveToPath(path, text, "report");
   const lines = text
     .split("\n")
     .filter((line, index, all) => line !== "" || index < all.length - 1).length;
   return {
-    path,
-    bytes: Buffer.byteLength(text, "utf8"),
+    ...written,
+    // `report`, not `json`: this file is the raw TSV/CSV Apple returned, and
+    // report_stats.py parses it as a table.
+    content: "report",
     lines,
     dataRows: Math.max(0, lines - 1),
   };
