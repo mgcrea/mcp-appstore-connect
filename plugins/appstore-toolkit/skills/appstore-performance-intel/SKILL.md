@@ -96,8 +96,27 @@ Start with sales, because it always works:
 app_store_connect_download_sales_report { reportDate, frequency, reportType: "SALES", maxLines: 5000 }
 ```
 
-Then the analytics walk. It is four hops and the first one is the one people
-skip:
+Then analytics. **Reach for `get_analytics_report` first** — it walks the whole
+chain in one call:
+
+```
+app_store_connect_get_analytics_report { appId, category: "APP_STORE_ENGAGEMENT",
+                                         granularity: "MONTHLY", savePath: "<abs>/…csv" }
+```
+
+Read three things out of it before using the numbers:
+
+- `selection` — which report and instance it chose, and the `alternatives` it
+  passed over. `COMMERCE` holds both "App Store Downloads" and "App Store
+  Purchases", which answer different questions; if you wanted the other one, pass
+  `reportName`.
+- `coverage` — the real first and last `Date` in the data. This is the period you
+  actually got. Do **not** use `selection.processingDate` for that: it is when
+  Apple generated the instance, and a fresh snapshot reports today while holding
+  a year of history.
+- `duplicateRows` — see the ONGOING-monthly hazard below. It is not swallowed.
+
+The four hops remain for anything the one-shot does not cover:
 
 ```
 app_store_connect_list_analytics_report_requests    { appId }
@@ -107,7 +126,9 @@ app_store_connect_download_analytics_report_segment { instanceId }
 ```
 
 **If there is no report request, analytics is not merely empty — it has never
-been enabled.** Creating one needs `create_analytics_report_request`, a write
+been enabled.** `get_analytics_report` says so directly, with
+`{"empty": true, "reason": "NO_REPORT_REQUEST", "writesEnabled": …}`, rather than
+returning nothing. Creating one needs `create_analytics_report_request`, a write
 tool that only exists when the server runs with
 `APP_STORE_CONNECT_ALLOW_WRITES=1`. If you cannot see that tool, that is the
 reason; say so and let the user opt in. Even once created, Apple takes a day or

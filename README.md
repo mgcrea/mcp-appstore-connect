@@ -293,6 +293,17 @@ _Italic\*_ tools are writes, hidden unless `APP_STORE_CONNECT_ALLOW_WRITES=1`. �
 
 Tool names are prefixed `app_store_connect_` (omitted above for brevity).
 
+### Response field deprecations
+
+| Field                         | Replaced by       | Status                                                                                                                                            |
+| ----------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rows` (report envelope)      | `lines`           | **Removed in 0.23.** Header-inclusive, while `dataRows` is not — two counts one apart is a transcription trap, and `lines` matches `saved.lines`. |
+| `note` (report envelope)      | `inlineNote`      | **Removed in 0.23.**                                                                                                                              |
+| `savedTo` (certificate tools) | `saved.path`      | Deprecated, removed in 0.24.                                                                                                                      |
+| `truncated` (report envelope) | `inlineTruncated` | **Kept indefinitely.**                                                                                                                            |
+
+`truncated` is the deliberate exception. Losing `rows`, `note` or `savedTo` fails loudly — a `KeyError`, an `undefined`, a failed assertion. Losing `truncated` fails _silently_ in the one direction that costs money: a reader that refuses to total a partial report sees `undefined`, treats it as false, and publishes a floor as a total. So it stays, with exactly its old value.
+
 A Claude Code skill that drives these tools through a full release ships alongside the server —
 see [Release-prep plugin](#release-prep-plugin).
 
