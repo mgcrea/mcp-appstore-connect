@@ -15,8 +15,15 @@ export const registerBuildTools = (
     {
       title: "App Store Connect: List Builds",
       description:
-        "List builds uploaded for an app (version, upload date, processing state, expiry). Filter " +
-        "by version string or processing state to find e.g. the latest VALID build for TestFlight.",
+        "List builds uploaded for an app (version, upload date, processing state, expiry, " +
+        "minOsVersion). Filter by version string or processing state to find e.g. the latest " +
+        "VALID build to distribute on TestFlight. **VALID means Apple finished processing the " +
+        "binary — it does not mean the build is on the App Store.** The newest VALID build is " +
+        "normally a TestFlight or in-review binary, so reading a shipping requirement off it " +
+        "(minOsVersion, deployment target) gives an answer that is wrong in the direction that " +
+        "looks right. The binary customers actually have is the one ATTACHED to the " +
+        "READY_FOR_SALE version, often several builds older: resolve it with " +
+        "app_store_connect_get_version.",
       inputSchema: z.object({
         appId: appIdArg,
         version: z

@@ -269,7 +269,7 @@ A **free** app still needs a price: "free" is a price point, not the absence of 
 
 **Screenshots** — `list_screenshot_sets`, `list_screenshots`, `get_screenshot`, _`upload_screenshot`_\*, _`delete_screenshot`_\*†, _`delete_screenshot_set`_\*†, _`reorder_screenshots`_\*†
 
-**Builds** — `list_builds`
+**Builds** — `list_builds` — every binary uploaded for an app, with its `minOsVersion`. **`VALID` means Apple finished processing it, not that it is on the App Store.** The newest `VALID` build is normally a TestFlight or in-review binary, so an OS floor or deployment target read off it is wrong in the direction that looks right — it describes what you are about to ship, not what customers are running. The live binary is the one _attached_ to the `READY_FOR_SALE` version, often several builds older; `get_version` resolves it.
 
 **TestFlight** — `list_beta_groups`, `list_beta_testers`, `list_beta_feedback`, _`create_beta_group`_\*, _`invite_beta_tester`_\*, _`add_tester_to_group`_\*, _`remove_tester_from_group`_\*† — an app with no group has nowhere to send a build, so `create_beta_group` is the first step of setting TestFlight up; every other tool here needs the group id it returns. Internal groups take testers who are already Users on the account and skip Beta App Review, so `hasAccessToAllBuilds` is the quickest way to make builds you have already uploaded installable.
 

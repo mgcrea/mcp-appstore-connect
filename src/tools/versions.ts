@@ -207,7 +207,10 @@ export const registerVersionTools = (
       title: "App Store Connect: List Versions",
       description:
         "List an app's App Store versions (each versionString and its review state, e.g. " +
-        "PREPARE_FOR_SUBMISSION, WAITING_FOR_REVIEW, READY_FOR_SALE).",
+        "PREPARE_FOR_SUBMISSION, WAITING_FOR_REVIEW, READY_FOR_SALE). Attributes only: the build " +
+        "each version ships is NOT in this response, so filtering to READY_FOR_SALE here tells " +
+        "you which version is live but nothing about its binary. Pass the versionId to " +
+        "app_store_connect_get_version for that.",
       inputSchema: z.object({
         appId: appIdArg,
         platform: z.enum(PLATFORMS).optional().describe("Filter by platform."),
