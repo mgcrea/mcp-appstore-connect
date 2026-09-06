@@ -4156,9 +4156,9 @@ describe("list_live_versions", () => {
     type: "appStoreVersions",
     id,
     attributes: { versionString, appStoreState, platform },
-    relationships: {
-      ...(buildId === null ? {} : { build: { data: { type: "builds", id: buildId } } }),
-    },
+    // No `build` key at all when nothing is attached, which is the shape Apple
+    // sends — distinct from a build that is attached but not sideloaded.
+    relationships: buildId === null ? {} : { build: { data: { type: "builds", id: buildId } } },
   });
 
   const build = (id: string, minOsVersion: string, buildVersion: string): unknown => ({
