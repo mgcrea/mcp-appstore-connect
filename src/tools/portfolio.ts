@@ -136,7 +136,8 @@ export const versionsOfApp = async (
 export const liveVersionsOf = async (
   client: AppStoreConnectClient,
   appId: string,
-): Promise<VersionWithBuild[]> => newestFirst(await versionsOfApp(client, appId, [LIVE_STATE]));
+): Promise<VersionWithBuild[]> =>
+  currentPerPlatform(await versionsOfApp(client, appId, [LIVE_STATE]));
 
 type AppRow = {
   appId: unknown;

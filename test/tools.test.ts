@@ -4540,6 +4540,59 @@ describe("get_app includeLiveVersion", () => {
     expect(fetchImpl.mock.calls).toHaveLength(2);
     expect(body.live[0]?.build.minOsVersion).toBe("26.0");
   });
+
+  /**
+   * Both go through liveVersionsOf, so they cannot disagree about what "live"
+   * means — and Apple leaves every shipped version in READY_FOR_SALE, so
+   * skipping the per-platform pick here returns the whole release history while
+   * the rollup returns one row.
+   */
+  it("returns the current version per platform, not the release history", async () => {
+    const fetchImpl = vi.fn(async (url: string) =>
+      String(url).includes("appStoreVersions")
+        ? jsonResponse({
+            data: [
+              {
+                type: "appStoreVersions",
+                id: "old",
+                attributes: {
+                  versionString: "1.0.0",
+                  appStoreState: "READY_FOR_SALE",
+                  platform: "MAC_OS",
+                },
+                relationships: { build: { data: { type: "builds", id: "b-old" } } },
+              },
+              {
+                type: "appStoreVersions",
+                id: "new",
+                attributes: {
+                  versionString: "1.8.1",
+                  appStoreState: "READY_FOR_SALE",
+                  platform: "MAC_OS",
+                },
+                relationships: { build: { data: { type: "builds", id: "b-new" } } },
+              },
+            ],
+            included: [
+              { type: "builds", id: "b-old", attributes: { minOsVersion: "15.5" } },
+              { type: "builds", id: "b-new", attributes: { minOsVersion: "26.0" } },
+            ],
+          })
+        : jsonResponse(appBody),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_get_app",
+        arguments: { appId: "1", includeLiveVersion: true },
+      }),
+    ) as { live: { versionString: string; build: { minOsVersion: string } }[] };
+
+    expect(body.live).toHaveLength(1);
+    expect(body.live[0]?.versionString).toBe("1.8.1");
+    expect(body.live[0]?.build.minOsVersion).toBe("26.0");
+  });
 });
 
 /**

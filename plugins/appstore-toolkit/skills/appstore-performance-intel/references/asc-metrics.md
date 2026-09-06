@@ -33,6 +33,11 @@ specific referrer or campaign token.
 | App Sessions                          | `APP_USAGE`            | how often people open the app and for how long                                      |
 | App Store Pre-Order                   | `COMMERCE`             | pre-orders, only relevant around a launch                                           |
 
+**The delimiter is not fixed.** Analytics segments have been observed both
+comma- and tab-delimited — the same account's engagement segment arrives with
+tabs while the fixtures here use commas — so sniff it from the header rather than
+assuming. `report_stats.py` and `get_analytics_report` both do.
+
 The columns are nearly uniform across all of them, which is what makes
 `report_stats.py group` work the same way on each:
 
