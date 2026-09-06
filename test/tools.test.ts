@@ -4516,7 +4516,10 @@ describe("multi-app reads", () => {
    */
   it("warns when a full page may have crowded an app out", async () => {
     const fetchImpl = vi.fn(async () =>
-      jsonResponse({ data: [buildRow("1", "1"), buildRow("2", "1")] }),
+      jsonResponse({
+        data: [buildRow("1", "1"), buildRow("2", "1")],
+        meta: { paging: { total: 9, limit: 2 } },
+      }),
     );
     const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
 
@@ -4528,10 +4531,14 @@ describe("multi-app reads", () => {
     ) as { note: string };
 
     expect(body.note).toContain("across all 2 apps");
+    // And the general fact underneath it: 7 rows did not fit.
+    expect((body as unknown as { incomplete: { missing: number } }).incomplete.missing).toBe(7);
   });
 
   it("does not warn when the page is not full", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse({ data: [buildRow("1", "1")] }));
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ data: [buildRow("1", "1")], meta: { paging: { total: 1, limit: 50 } } }),
+    );
     const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
 
     const body = payloadOf(
@@ -4890,5 +4897,110 @@ describe("get_analytics_report", () => {
     expect(await toolNames(await connect(baseConfig))).toContain(
       "app_store_connect_get_analytics_report",
     );
+  });
+});
+
+/**
+ * Apple caps `data` at `limit` and puts the real count in `meta.paging.total`.
+ * Nothing in the rows says they are a subset, so a caller reading a full page
+ * concludes the collection is what it can see — and reports something as ABSENT
+ * because it fell off the end. That is not hypothetical: a capped list_builds
+ * page was read as "half the upload never landed", which would have sent
+ * someone re-uploading a build that was already there.
+ */
+describe("partial pages", () => {
+  const buildRows = (n: number): unknown[] =>
+    Array.from({ length: n }, (_, i) => ({
+      type: "builds",
+      id: `b${i}`,
+      attributes: { version: String(i) },
+    }));
+
+  it("says how many rows did not fit", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ data: buildRows(50), meta: { paging: { total: 137, limit: 50 } } }),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_builds",
+        arguments: { appId: "1" },
+      }),
+    ) as { incomplete: { returned: number; total: number; missing: number; note: string } };
+
+    expect(body.incomplete).toMatchObject({ returned: 50, total: 137, missing: 87 });
+    // The instruction that prevents the wrong conclusion, not just the numbers.
+    expect(body.incomplete.note).toContain("Do NOT read anything as absent");
+  });
+
+  it("says nothing when the page holds everything", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ data: buildRows(3), meta: { paging: { total: 3, limit: 50 } } }),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_builds",
+        arguments: { appId: "1" },
+      }),
+    ) as Record<string, unknown>;
+
+    // Absence of the block is itself a claim — that the list is complete — so it
+    // must never appear when it has nothing to say.
+    expect(body).not.toHaveProperty("incomplete");
+  });
+
+  /** Apple marks `total` optional in its own schema; a next link still proves it. */
+  it("falls back to the next link when Apple omits the total", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        data: buildRows(50),
+        meta: { paging: { limit: 50 } },
+        links: { next: "https://api.appstoreconnect.apple.com/v1/builds?cursor=abc" },
+      }),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_builds",
+        arguments: { appId: "1" },
+      }),
+    ) as { incomplete: { returned: number; note: string; total?: number } };
+
+    expect(body.incomplete.returned).toBe(50);
+    expect(body.incomplete.total).toBeUndefined();
+    expect(body.incomplete.note).toContain("more exist");
+  });
+
+  it("applies to every list read, not just builds", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        data: [{ type: "apps", id: "1", attributes: { name: "Alpha" } }],
+        meta: { paging: { total: 9, limit: 1 } },
+      }),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({ name: "app_store_connect_list_apps", arguments: { limit: 1 } }),
+    ) as { incomplete: { missing: number } };
+
+    expect(body.incomplete.missing).toBe(8);
+  });
+
+  it("leaves a single-resource read alone", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ data: { type: "apps", id: "1", attributes: { name: "Alpha" } } }),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({ name: "app_store_connect_get_app", arguments: { appId: "1" } }),
+    ) as Record<string, unknown>;
+
+    expect(body).not.toHaveProperty("incomplete");
   });
 });

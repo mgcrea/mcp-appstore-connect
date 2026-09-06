@@ -50,7 +50,7 @@ Both trace back to the exact commit and CI run that produced them. The commands 
 
 **The `.p8` never leaves your machine, and never goes over the wire.** Tokens are minted locally: the server signs short-lived ES256 JWTs (20-minute cap, re-signed just before expiry) using Node's built-in `node:crypto`. There is no `jsonwebtoken` or `jose` in the signing path — one less dependency between your private key and the network. Under Docker the key is mounted read-only and is never baked into the image.
 
-**The server never writes to your disk.** `export_listing` hands back `{path, content}` pairs and your agent writes them, so every file write stays under your own MCP client's permission prompt rather than happening invisibly inside the server.
+**The server writes to disk only where you explicitly point it.** There is no path it picks for itself and no cache: a file is written when, and only when, you pass a `savePath`, and that path must be absolute — a relative one is refused rather than resolved against whatever directory the server happens to be running in. `export_listing` is deliberately not part of that: it hands back `{path, content}` pairs for your agent to write, so applying a listing stays under your own MCP client's permission prompt.
 
 ### Blast radius
 
@@ -204,7 +204,9 @@ npx @modelcontextprotocol/inspector npx -y @mgcrea/mcp-appstore-connect
 
 ## Tools
 
-**Apps** — `list_apps`, `get_app`, _`update_app`_\* — `update_app` carries `contentRightsDeclaration`, one of the gates below.
+**Apps** — `list_apps`, `get_app`, _`update_app`_\* — `update_app` carries `contentRightsDeclaration`, one of the gates below. Neither read says which binary an app ships: pass `includeLiveVersion` to `get_app`, or use `list_live_versions` for the whole account.
+
+**Portfolio** — `list_live_versions` — for every app on the account (or a subset), the version customers can download **right now** and the binary it ships: build number, `minOsVersion`, `uploadedDate`. One call and `1 + N` requests, against `list_versions` → `get_version` per app. The live build is the one _attached_ to the `READY_FOR_SALE` version, which is usually **not** the newest `VALID` build — that one is a TestFlight or in-review binary, and reading an OS floor off it is wrong in the direction that looks right. Apps that fail are reported in `errors` and named in `note` rather than dropped, and an app with nothing live keeps its row with `live: []`. `list_builds`, `list_beta_groups` and `list_review_submissions` also take an array of app ids, since Apple serves those three in one request; every row carries the `appId` it belongs to.
 
 **Submission prerequisites** — what a **first** submission trips over. None of these lives on the version, so nothing in the version's own state hints at them, and `submit_version_for_review` fails with one error per missing item and no id to chase. Each is set once and outlives every release:
 
@@ -275,7 +277,7 @@ A **free** app still needs a price: "free" is a price point, not the absence of 
 
 **Sales & finance reports** — `get_vendor_number`, `download_sales_report`, `download_finance_report` — the Sales and Trends TSVs: units, proceeds, installs by territory and install type. Needs a vendor number; `get_vendor_number` reports the configured one, which layer it came from, and whether Apple accepts it. The sales report is account-wide and Apple offers no per-app filter, so pass `appleIdentifier` or `sku` to have the server apply one after download — it runs before `maxLines`, so truncation counts the app you asked about rather than an arbitrary slice of the portfolio, and the dropped row count comes back with it. **An in-app purchase row does not carry its app's Apple Identifier** — it carries the IAP's own, and names the app only in `Parent Identifier`, as the SKU. Filtering on the app id alone therefore returns a clean, plausible report showing no in-app revenue at all, so the server matches those rows through `Parent Identifier` too and says how many it found; `includeInAppPurchases: false` opts out and reports what that cost. **`download_finance_report` takes a _fiscal_ period, not a calendar one:** Apple's fiscal year opens in late September and its months are 4-4-5 weeks, so `2026-07` is fiscal month 7 of FY2026 — roughly late March to early May. Getting this wrong is silent, because a well-formed report comes back either way, so the response carries a `coverage` block with the start and end dates the report actually covers. Check it before quoting any figure.
 
-**Analytics** — `get_analytics_status`, `list_analytics_report_requests`, `list_analytics_reports`, `list_analytics_report_instances`, `list_analytics_report_segments`, `download_analytics_report_segment`, _`create_analytics_report_request`_\* — App Analytics proper: impressions, product page views, conversion rate, installs, deletions, sessions, retention. `get_analytics_status` walks the whole chain in one call and answers "is there any data yet, and how far back does it go" — reach for it before the four-step walk, especially just after enabling analytics, since reports exist as soon as Apple registers them but hold nothing until instances appear a day or two later. See [Reading analytics](#reading-analytics).
+**Analytics** — `get_analytics_report`, `get_analytics_status`, `list_analytics_report_requests`, `list_analytics_reports`, `list_analytics_report_instances`, `list_analytics_report_segments`, `download_analytics_report_segment`, _`create_analytics_report_request`_\* — App Analytics proper: impressions, product page views, conversion rate, installs, deletions, sessions, retention. `get_analytics_report` walks the whole chain and returns the numbers, picking the report and instance itself and saying which in `selection`; its `coverage` block is read from the data's own `Date` column, because an instance's `processingDate` is when Apple _generated_ it and says nothing about what is inside. `get_analytics_status` answers the cheaper question "is there any data yet, and how far back does it go" — reach for it just after enabling analytics, since reports exist as soon as Apple registers them but hold nothing until instances appear a day or two later. See [Reading analytics](#reading-analytics).
 
 **Customer reviews** — `list_customer_reviews` — star rating, title, body, territory and date, newest first; filter by rating to read just the complaints. These are **written** reviews only. Most people rate without writing, and Apple exposes no aggregate star average here, so a distribution computed from these is directional — it is not the App Store rating.
 
@@ -284,6 +286,8 @@ A **free** app still needs a price: "free" is a price point, not the absence of 
 **Bundle IDs** — `list_bundle_ids`, `get_bundle_id`, _`create_bundle_id`_\*, _`enable_capability`_\*, _`disable_capability`_\*†
 
 **Devices** — `list_devices`, _`register_device`_\*
+
+**Every list read says when its page is a subset.** Apple caps `data` at `limit` and puts the real count in `meta.paging.total`, and nothing in the rows themselves says they are partial — so a full page reads as the whole collection, and something that fell off the end reads as absent. A partial response carries an `incomplete` block with `returned`, `total` and `missing`. Its absence is the claim that the list is complete.
 
 _Italic\*_ tools are writes, hidden unless `APP_STORE_CONNECT_ALLOW_WRITES=1`. † additionally requires `confirm: true`.
 
@@ -323,11 +327,13 @@ fastlane path is the default only because it's the one other tools already read.
 
 The server writes to disk only where you point it. `export_listing` hands back
 `{path, content}` pairs and your agent writes them, so listing writes stay under your own
-permission prompt. The three report downloads take an optional `savePath`, because the
-alternative — retyping a TSV out of a tool result — loses rows silently, and a report
-missing a row still totals to a plausible number. A saved file always holds the report in
-full; `maxLines` then only trims the copy inlined in the response. Under Docker the path
-must resolve inside the container, so mount the folder and pass the container path.
+permission prompt. **Every read tool takes an optional `savePath`**, because the
+alternative — an agent retyping values out of a tool result — loses them silently, and a
+report missing a row still totals to a plausible number. The three report downloads write
+the raw TSV/CSV and `download_certificate` writes DER bytes; every other read writes its
+JSON result, pretty-printed. A saved report always holds the file in full; `maxLines` then
+only trims the copy inlined in the response. Under Docker the path must resolve inside the
+container, so mount the folder and pass the container path.
 
 Editing and pushing back:
 
@@ -368,10 +374,21 @@ analyticsReportRequest   one per app, created once, then reused forever
             └─ segment   the gzipped CSV that holds the rows
 ```
 
-`get_analytics_status` collapses the whole walk into one call — request, report and instance
-counts plus the earliest instance date — and is the right first move when the question is
-simply whether there is any data yet. The four hops below are for reaching the numbers
-themselves.
+Two tools collapse that walk, and between them cover almost every question:
+
+- **`get_analytics_report`** goes all the way to the numbers in one call. It picks the
+  report and instance itself and reports both in `selection`, alongside the alternatives it
+  passed over, and returns `coverage` read from the data's own `Date` column — the only
+  honest answer to which period you actually got, since an instance's `processingDate` is
+  when Apple _generated_ it and a fresh snapshot reports today while holding a year of
+  history. It downloads every segment by default and checks their total compressed size
+  before fetching anything. It will not create the report request: that is a write, and
+  creating only `ONGOING` forfeits the app's history permanently.
+- **`get_analytics_status`** answers "is there any data yet" — request, report and instance
+  counts plus the earliest instance date — and is the right first move just after enabling
+  analytics.
+
+The four hops below remain for anything those two do not cover.
 
 One tool per hop, in order:
 

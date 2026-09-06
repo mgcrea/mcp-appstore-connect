@@ -260,16 +260,20 @@ export const summarizeWithApp = (
   }));
   const summarized = summarizeResponse(response) as Record<string, unknown>;
   const many = Array.isArray(appIds) && appIds.length > 1;
+  // Only when the page really is a subset — `incomplete` is summarizeResponse's
+  // own verdict on that, so a page that happens to be exactly `limit` long and
+  // complete does not get warned about.
+  const partial = summarized.incomplete !== undefined;
   return {
     ...summarized,
     data: rows,
-    ...(many && rows.length >= limit
+    ...(many && partial
       ? {
           note:
-            `This page is full (${rows.length} of a limit of ${limit}), and Apple applies that ` +
-            `limit across all ${appIds.length} apps at once rather than per app — so an app with ` +
-            `no rows here may simply have been crowded out. Raise limit, or ask per app, before ` +
-            `concluding anything about an app that is missing.`,
+            `Apple applies \`limit\` across all ${appIds.length} apps at once rather than per ` +
+            `app, and its sort cannot interleave them, so the rows that did not fit may all ` +
+            `belong to one app — see \`incomplete\`. An app missing from this page has not been ` +
+            `shown to have nothing. Raise limit, or ask per app.`,
         }
       : {}),
   };
