@@ -272,11 +272,16 @@ export const registerSubmissionTools = (
       wrapSaved(savePath, async () =>
         summarizeSubmissions(
           await client.get(
-            `/v1/apps/${appId}/reviewSubmissions`,
+            // The top-level collection, not /v1/apps/{id}/reviewSubmissions:
+            // `filter[app]` is an array here, so several apps come back in one
+            // request, and `include=app` is what puts `data` on the relationship
+            // so the rows can be told apart.
+            "/v1/reviewSubmissions",
             compact({
+              "filter[app]": appId,
               "filter[platform]": platform,
               "filter[state]": state,
-              include: "appStoreVersionForReview",
+              include: "app,appStoreVersionForReview",
               limit,
             }),
           ),

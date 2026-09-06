@@ -72,14 +72,36 @@ const mapSettled = async <T, R>(
   return results;
 };
 
-/**
- * Newest first within one platform, so `live[0]` is the shipping version even in
- * the case Apple is not supposed to produce.
- */
+/** Newest first by version number, so index 0 is the shipping one. */
 const newestFirst = (versions: VersionWithBuild[]): VersionWithBuild[] =>
   [...versions].sort((a, b) =>
     compareVersions(String(b.versionString ?? "0"), String(a.versionString ?? "0")),
   );
+
+/**
+ * The one version per platform that customers actually get.
+ *
+ * Apple does NOT move a superseded version out of READY_FOR_SALE — every version
+ * an app has ever shipped keeps that state forever. Filtering on it therefore
+ * returns the app's whole release history, newest and oldest alike, all looking
+ * equally current: one real account answered this filter with eleven versions
+ * for a single Mac app. Anything that reads a shipping requirement off that list
+ * without picking per platform gets a plausible number from an arbitrary old
+ * binary, which is precisely the failure this tool exists to prevent.
+ *
+ * Per platform, not overall, because a universal app genuinely ships an IOS and
+ * a MAC_OS version at once.
+ */
+const currentPerPlatform = (versions: VersionWithBuild[]): VersionWithBuild[] => {
+  const byPlatform = new Map<string, VersionWithBuild>();
+  for (const version of newestFirst(versions)) {
+    const platform = String(version.platform ?? "UNKNOWN");
+    if (!byPlatform.has(platform)) byPlatform.set(platform, version);
+  }
+  return [...byPlatform.values()].sort((a, b) =>
+    String(a.platform ?? "").localeCompare(String(b.platform ?? "")),
+  );
+};
 
 /**
  * The versions of one app in the given states, each with its own build.
@@ -121,6 +143,7 @@ type AppRow = {
   name: unknown;
   bundleId: unknown;
   live: VersionWithBuild[];
+  supersededVersions?: number;
   inFlight?: VersionWithBuild[];
 };
 
@@ -217,11 +240,18 @@ export const registerPortfolioTools = (
             return;
           }
           const versions = result.value;
+          const shipped = versions.filter((v) => v.appStoreState === LIVE_STATE);
+          const live = currentPerPlatform(shipped);
           rows.push({
             appId: app.id,
             name: attrs.name,
             bundleId: attrs.bundleId,
-            live: newestFirst(versions.filter((v) => v.appStoreState === LIVE_STATE)),
+            live,
+            // Counted rather than dropped, so the difference between "one
+            // version" and "the newest of eleven" is visible.
+            ...(shipped.length > live.length
+              ? { supersededVersions: shipped.length - live.length }
+              : {}),
             ...(includeInFlight
               ? { inFlight: newestFirst(versions.filter((v) => v.appStoreState !== LIVE_STATE)) }
               : {}),
@@ -246,6 +276,7 @@ export const registerPortfolioTools = (
         rows.sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")));
 
         const noLiveVersion = rows.filter((row) => row.live.length === 0).length;
+        const superseded = rows.reduce((sum, row) => sum + (row.supersededVersions ?? 0), 0);
         const noBuild = rows.filter((row) => row.live.some((v) => v.build === null)).length;
 
         const notes: string[] = [];
@@ -262,6 +293,14 @@ export const registerPortfolioTools = (
           notes.push(
             `${noLiveVersion} app(s) have no ${LIVE_STATE} version: either never shipped, or ` +
               `removed from sale. \`live: []\` is the row, not an omission.`,
+          );
+        }
+        if (superseded > 0) {
+          notes.push(
+            `Apple leaves every version an app has ever shipped in ${LIVE_STATE}, so filtering on ` +
+              `that state returns the whole release history — ${superseded} such older version(s) ` +
+              `were set aside here. \`live\` holds only the newest per platform, which is what ` +
+              `customers actually get.`,
           );
         }
         if (noBuild > 0) {

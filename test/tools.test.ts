@@ -4405,6 +4405,86 @@ describe("list_live_versions", () => {
     expect(body.apps[0]?.inFlight.map((v) => v.versionString)).toEqual(["1.5.0"]);
   });
 
+  /**
+   * Apple does NOT move a superseded version out of READY_FOR_SALE — every
+   * version an app has ever shipped keeps that state forever. Filtering on it
+   * returns the whole release history, all of it looking equally current: one
+   * real account answered with eleven versions for a single Mac app, and 74
+   * across the portfolio. Reading an OS floor off an arbitrary member of that
+   * list is the bug this tool exists to prevent.
+   */
+  it("keeps only the newest version per platform out of the release history", async () => {
+    const fetchImpl = routed([
+      [/\/v1\/apps\?/, () => jsonResponse({ data: [app("1", "Universal")] })],
+      [
+        /\/appStoreVersions/,
+        () =>
+          jsonResponse({
+            data: [
+              version("v-old", "1.0.0", "READY_FOR_SALE", "b-old", "MAC_OS"),
+              version("v-new", "1.8.1", "READY_FOR_SALE", "b-new", "MAC_OS"),
+              version("v-mid", "1.7.0", "READY_FOR_SALE", "b-mid", "MAC_OS"),
+              version("v-ios", "1.8.1", "READY_FOR_SALE", "b-ios", "IOS"),
+            ],
+            included: [
+              build("b-old", "15.5", "36"),
+              build("b-new", "26.0", "275"),
+              build("b-mid", "26.0", "242"),
+              build("b-ios", "17.0", "275"),
+            ],
+          }),
+      ],
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({ name: "app_store_connect_list_live_versions", arguments: {} }),
+    ) as {
+      apps: {
+        live: { platform: string; versionString: string; build: { minOsVersion: string } }[];
+        supersededVersions: number;
+      }[];
+      note: string;
+    };
+
+    const row = body.apps[0];
+    // One per platform, not four rows all claiming to be live.
+    expect(row?.live).toHaveLength(2);
+    expect(row?.live.find((v) => v.platform === "MAC_OS")?.versionString).toBe("1.8.1");
+    // The one that matters: the OS floor comes from the CURRENT binary, not the
+    // 15.5 of a version shipped two years ago that is still READY_FOR_SALE.
+    expect(row?.live.find((v) => v.platform === "MAC_OS")?.build.minOsVersion).toBe("26.0");
+    expect(row?.live.find((v) => v.platform === "IOS")?.versionString).toBe("1.8.1");
+    // Set aside, not silently dropped.
+    expect(row?.supersededVersions).toBe(2);
+    expect(body.note).toContain("whole release history");
+  });
+
+  it("orders numerically, so 1.10.0 beats 1.9.0", async () => {
+    const fetchImpl = routed([
+      [/\/v1\/apps\?/, () => jsonResponse({ data: [app("1", "Alpha")] })],
+      [
+        /\/appStoreVersions/,
+        () =>
+          jsonResponse({
+            data: [
+              version("v9", "1.9.0", "READY_FOR_SALE", "b9"),
+              version("v10", "1.10.0", "READY_FOR_SALE", "b10"),
+            ],
+            included: [build("b9", "16.0", "90"), build("b10", "26.0", "100")],
+          }),
+      ],
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({ name: "app_store_connect_list_live_versions", arguments: {} }),
+    ) as { apps: { live: { versionString: string }[] }[] };
+
+    // A lexical sort picks 1.9.0 and reports an OS floor from the wrong binary.
+    expect(body.apps[0]?.live[0]?.versionString).toBe("1.10.0");
+  });
+
   /** The description of the tool that misleads must point at the one that does not. */
   it("is named by list_builds' description", async () => {
     const client = await connect(baseConfig);
@@ -4488,9 +4568,36 @@ describe("multi-app reads", () => {
     ) as { data: { id: string; appId: string }[] };
 
     expect(fetchImpl.mock.calls).toHaveLength(1);
-    expect(new URL(callArgs(fetchImpl, 0)[0]).searchParams.get("filter[app]")).toBe("1,2");
+    const url = new URL(callArgs(fetchImpl, 0)[0]);
+    expect(url.searchParams.get("filter[app]")).toBe("1,2");
+    // Asserted on the REQUEST, not just on a hand-built fixture. Apple returns
+    // the app relationship as links only unless `include=app` is asked for, so a
+    // mock that supplies `data` unconditionally will pass while the live call
+    // returns appId: undefined — which is exactly what happened.
+    expect(url.searchParams.get("include")).toBe("app");
     // Without this the rows arrive interleaved with nothing to tell them apart.
     expect(body.data.map((b) => b.appId)).toEqual(["1", "2"]);
+  });
+
+  it("asks for include=app on every endpoint that reports a per-row appId", async () => {
+    const cases: [string, Record<string, unknown>, string][] = [
+      ["list_builds", { appId: ["1", "2"] }, "/v1/builds"],
+      ["list_beta_groups", { appId: ["1", "2"] }, "/v1/betaGroups"],
+      ["list_review_submissions", { appId: ["1", "2"] }, "/v1/reviewSubmissions"],
+    ];
+
+    for (const [tool, args, pathname] of cases) {
+      const fetchImpl = vi.fn(async () => jsonResponse({ data: [] }));
+      const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+      await client.callTool({ name: `app_store_connect_${tool}`, arguments: args });
+
+      const url = new URL(callArgs(fetchImpl, 0)[0]);
+      // The top-level collection, never /v1/apps/{id}/… — a path-scoped endpoint
+      // given an array of ids would request /v1/apps/1,2/… and 404.
+      expect(url.pathname, tool).toBe(pathname);
+      expect(url.searchParams.get("filter[app]"), tool).toBe("1,2");
+      expect(url.searchParams.get("include")?.split(",").includes("app"), tool).toBe(true);
+    }
   });
 
   it("still takes a single id, and still says which app each row is", async () => {
@@ -4578,10 +4685,17 @@ describe("get_analytics_report", () => {
     attributes: { granularity, processingDate },
   });
 
-  /** The five hops, routed by URL. */
+  /**
+   * The five hops, routed by URL.
+   *
+   * `reports` is keyed by REQUEST id, not flat, because that is how Apple serves
+   * it — /v1/analyticsReportRequests/{id}/reports — and a mock that returns the
+   * same reports for every request hides which one a report belongs to. That is
+   * exactly the fact the access-type preference depends on.
+   */
   const walk = (opts: {
     requests?: unknown[];
-    reports?: unknown[];
+    reports?: unknown[] | Record<string, unknown[]>;
     instances?: Record<string, unknown[]>;
     segments?: unknown[];
     csv?: string;
@@ -4602,7 +4716,13 @@ describe("get_analytics_report", () => {
           ],
         });
       }
-      if (u.includes("/reports")) return jsonResponse({ data: opts.reports ?? [] });
+      if (u.includes("/reports")) {
+        const requestId = /analyticsReportRequests\/([^/?]+)/.exec(u)?.[1] ?? "";
+        const reports = Array.isArray(opts.reports)
+          ? opts.reports
+          : (opts.reports?.[requestId] ?? []);
+        return jsonResponse({ data: reports });
+      }
       if (u.includes("/instances")) {
         const id = /analyticsReports\/([^/?]+)/.exec(u)?.[1] ?? "";
         return jsonResponse({ data: opts.instances?.[id] ?? [] });
@@ -4743,10 +4863,48 @@ describe("get_analytics_report", () => {
           attributes: { accessType: "ONE_TIME_SNAPSHOT" },
         },
       ],
-      reports: [
-        report("r1", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT", "ongoing"),
-        report("r2", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT", "snap"),
+      // Each request serves its own copy of the same report name — which is what
+      // the account really looks like, and why the pick has to be per request.
+      reports: {
+        ongoing: [
+          report("r1", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT", "ongoing"),
+        ],
+        snap: [report("r2", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT", "snap")],
+      },
+      instances: { r1: [instance("i1", "MONTHLY")], r2: [instance("i2", "MONTHLY")] },
+    });
+
+    const body = payloadOf(await call(fetchImpl, { granularity: "MONTHLY" })) as {
+      selection: { accessType: string; instanceId: string };
+    };
+
+    expect(body.selection.accessType).toBe("ONE_TIME_SNAPSHOT");
+    expect(body.selection.instanceId).toBe("i2");
+  });
+
+  /**
+   * Apple returns `relationships.analyticsReportRequest` on a report as links
+   * only, with no `data`, so reading the access type off the resource yields
+   * undefined — which silently disables the preference above. The request id is
+   * therefore taken from the URL that fetched the report.
+   */
+  it("resolves the access type even when Apple omits the relationship data", async () => {
+    const bare = (id: string): unknown => ({
+      type: "analyticsReports",
+      id,
+      attributes: { name: "App Store Discovery and Engagement", category: "APP_STORE_ENGAGEMENT" },
+      // No `relationships` at all — the live shape.
+    });
+    const fetchImpl = walk({
+      requests: [
+        { type: "analyticsReportRequests", id: "ongoing", attributes: { accessType: "ONGOING" } },
+        {
+          type: "analyticsReportRequests",
+          id: "snap",
+          attributes: { accessType: "ONE_TIME_SNAPSHOT" },
+        },
       ],
+      reports: { ongoing: [bare("r1")], snap: [bare("r2")] },
       instances: { r1: [instance("i1", "MONTHLY")], r2: [instance("i2", "MONTHLY")] },
     });
 

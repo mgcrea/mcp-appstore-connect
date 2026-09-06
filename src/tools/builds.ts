@@ -56,6 +56,10 @@ export const registerBuildTools = (
               "filter[app]": appId,
               "filter[version]": version,
               "filter[processingState]": processingState,
+              // Required for the per-row appId: without it Apple returns the app
+              // relationship as links only, with no `data`, so several apps'
+              // builds come back indistinguishable.
+              include: "app",
               limit,
             }),
           ),

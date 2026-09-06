@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
 import { AppStoreConnectApiError } from "#/client/errors";
-import { attributesOf, type Rec, relatedId, resourcesOf, summarizeResponse } from "#/client/shape";
+import { attributesOf, type Rec, resourcesOf, summarizeResponse } from "#/client/shape";
 import {
   classifyByCalendar,
   classifyProbe,
@@ -1022,6 +1022,16 @@ type AnalyticsWalk = {
   probed: Rec[];
   instancePages: { data: Rec[] }[];
   excluded: number;
+  /**
+   * Which request each report came from, keyed by report id.
+   *
+   * Taken from the URL that fetched it, not from a relationship: Apple returns
+   * `relationships.analyticsReportRequest` on a report as links only, with no
+   * `data`, so reading the access type off the resource yields undefined — and
+   * an undefined access type silently disables the MONTHLY snapshot preference
+   * that exists to avoid a doubled month.
+   */
+  requestIdOf: Map<string, string>;
 };
 
 /**
@@ -1049,15 +1059,18 @@ const walkAnalytics = async (
     limit: 200,
   });
   const accessTypes = requests.data.map((request) => attributesOf(request).accessType);
-  const empty = {
-    requests: requests.data,
-    accessTypes,
-    reports: [],
-    probed: [],
-    instancePages: [],
-    excluded: 0,
-  };
-  if (requests.data.length === 0) return empty;
+  const requestIdOf = new Map<string, string>();
+  if (requests.data.length === 0) {
+    return {
+      requests: requests.data,
+      accessTypes,
+      reports: [],
+      probed: [],
+      instancePages: [],
+      excluded: 0,
+      requestIdOf,
+    };
+  }
 
   await notify(1, 2, `Listing reports for ${requests.data.length} requests`);
   const reportPages = await Promise.all(
@@ -1068,6 +1081,10 @@ const walkAnalytics = async (
       ),
     ),
   );
+  reportPages.forEach((page, index) => {
+    const requestId = String(requests.data[index]?.id ?? "");
+    for (const report of page.data) requestIdOf.set(String(report.id), requestId);
+  });
   const allReports = reportPages.flatMap((page) => page.data);
 
   // Apple returns FRAMEWORK_USAGE for things like AirPlay discovery sessions on
@@ -1105,7 +1122,15 @@ const walkAnalytics = async (
     if (stopWhen(instancePages)) break;
   }
 
-  return { requests: requests.data, accessTypes, reports, probed, instancePages, excluded };
+  return {
+    requests: requests.data,
+    accessTypes,
+    reports,
+    probed,
+    instancePages,
+    excluded,
+    requestIdOf,
+  };
 };
 
 /**
@@ -2088,7 +2113,7 @@ export const registerReportTools = (
 
         const wanted = candidates.filter((report) => {
           if (wantedAccess === undefined || wantedAccess === "ANY") return true;
-          const requestId = relatedId(report, "analyticsReportRequest");
+          const requestId = walk.requestIdOf.get(String(report.id));
           return requestId === undefined || accessOf.get(requestId) === wantedAccess;
         });
         if (wanted.length > 0) candidates = wanted;
@@ -2123,7 +2148,7 @@ export const registerReportTools = (
         const chosen = withInstances[0] as Rec;
         const chosenIndex = walk.probed.indexOf(chosen);
         const chosenAttrs = attributesOf(chosen);
-        const chosenRequestId = relatedId(chosen, "analyticsReportRequest");
+        const chosenRequestId = walk.requestIdOf.get(String(chosen.id));
 
         // Newest instance unless the caller named a processing date.
         const instances = (walk.instancePages[chosenIndex]?.data ?? []).toSorted((a, b) =>

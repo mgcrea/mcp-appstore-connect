@@ -44,7 +44,12 @@ export const registerTestflightTools = (
     async ({ appId, limit, savePath }) =>
       wrapSaved(savePath, async () =>
         summarizeWithApp(
-          await client.get("/v1/betaGroups", compact({ "filter[app]": appId, limit })),
+          await client.get(
+            "/v1/betaGroups",
+            // include=app is what puts `data` on the app relationship; without
+            // it several apps' groups are indistinguishable.
+            compact({ "filter[app]": appId, include: "app", limit }),
+          ),
           limit,
           appId,
         ),
