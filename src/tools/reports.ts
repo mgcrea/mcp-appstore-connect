@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
 import { AppStoreConnectApiError } from "#/client/errors";
-import { attributesOf, type Rec, resourcesOf, summarizeResponse } from "#/client/shape";
+import { attributesOf, type Rec, relatedId, resourcesOf, summarizeResponse } from "#/client/shape";
 import {
   classifyByCalendar,
   classifyProbe,
@@ -981,6 +981,209 @@ const requireVendor = (arg: string | undefined, ctxVendor: string | undefined): 
   return vendor;
 };
 
+/**
+ * The MCP request handle a tool handler is given, narrowed to what progress
+ * reporting needs.
+ */
+type ProgressRequest = {
+  mcpReq: {
+    _meta?: { progressToken?: string | number };
+    notify: (n: { method: string; params: Rec }) => Promise<void>;
+  };
+};
+
+/**
+ * Report progress, when the caller asked for it.
+ *
+ * The analytics walks are the slowest thing this server does — sequential
+ * stages, and Apple registers ~106 reports against a default probe of 20, so one
+ * stage is several round trips on its own. Without this the caller sees nothing
+ * until the whole chain finishes.
+ *
+ * Silent when no token was sent: progress is something a client opts into per
+ * call, and emitting frames nobody asked for is traffic dropped at the far end.
+ */
+const progressNotifier =
+  (req: ProgressRequest) =>
+  async (progress: number, total: number, message: string): Promise<void> => {
+    const progressToken = req.mcpReq._meta?.progressToken;
+    if (progressToken === undefined) return;
+    await req.mcpReq.notify({
+      method: "notifications/progress",
+      params: { progressToken, progress, total, message },
+    });
+  };
+
+type AnalyticsWalk = {
+  requests: Rec[];
+  accessTypes: unknown[];
+  /** Reports after the FRAMEWORK_USAGE filter. */
+  reports: Rec[];
+  probed: Rec[];
+  instancePages: { data: Rec[] }[];
+  excluded: number;
+};
+
+/**
+ * Walk requests -> reports -> instances for one app.
+ *
+ * Shared by `get_analytics_status`, which asks "is there any data at all", and
+ * `get_analytics_report`, which is looking for one particular instance. They
+ * differ only in when to stop, which is what `stopWhen` is for — so the walk
+ * itself, and its several paginated round trips, exist once.
+ */
+const walkAnalytics = async (
+  client: AppStoreConnectClient,
+  appId: string,
+  opts: {
+    category?: string | undefined;
+    includeFrameworkUsage: boolean;
+    maxReportsProbed: number;
+    instanceQuery?: Record<string, unknown>;
+    stopWhen?: (pages: { data: Rec[] }[]) => boolean;
+  },
+  notify: (progress: number, total: number, message: string) => Promise<void>,
+): Promise<AnalyticsWalk> => {
+  await notify(0, 2, "Reading analytics report requests");
+  const requests = await client.getAll<Rec>(`/v1/apps/${appId}/analyticsReportRequests`, {
+    limit: 200,
+  });
+  const accessTypes = requests.data.map((request) => attributesOf(request).accessType);
+  const empty = {
+    requests: requests.data,
+    accessTypes,
+    reports: [],
+    probed: [],
+    instancePages: [],
+    excluded: 0,
+  };
+  if (requests.data.length === 0) return empty;
+
+  await notify(1, 2, `Listing reports for ${requests.data.length} requests`);
+  const reportPages = await Promise.all(
+    requests.data.map((request) =>
+      client.getAll<Rec>(
+        `/v1/analyticsReportRequests/${request.id}/reports`,
+        compact({ "filter[category]": opts.category, limit: 200 }),
+      ),
+    ),
+  );
+  const allReports = reportPages.flatMap((page) => page.data);
+
+  // Apple returns FRAMEWORK_USAGE for things like AirPlay discovery sessions on
+  // apps that never touch them, and it dominates the catalogue by count.
+  const isNoise = (report: Rec): boolean => attributesOf(report).category === "FRAMEWORK_USAGE";
+  const filtering = opts.category === undefined && !opts.includeFrameworkUsage;
+  const excluded = filtering ? allReports.filter(isNoise).length : 0;
+  const reports = filtering ? allReports.filter((report) => !isNoise(report)) : allReports;
+
+  /**
+   * Probe in batches, and keep going while the answer is still zero.
+   *
+   * A bounded walk makes every count a floor, and a floor of zero answers
+   * nothing — which matters because Apple registers ~106 reports against a
+   * default of 20. Once a single instance has been found the cap is harmless:
+   * the caller knows data exists and the floor caveat covers the rest.
+   */
+  const stopWhen = opts.stopWhen ?? ((pages) => pages.some((page) => page.data.length > 0));
+  const probed: Rec[] = [];
+  const instancePages: { data: Rec[] }[] = [];
+  const total = 2 + reports.length;
+  while (probed.length < reports.length) {
+    const batch = reports.slice(probed.length, probed.length + opts.maxReportsProbed);
+    const pages = await Promise.all(
+      batch.map((report) =>
+        client.getAll<Rec>(
+          `/v1/analyticsReports/${report.id}/instances`,
+          compact({ ...opts.instanceQuery, limit: 200 }),
+        ),
+      ),
+    );
+    probed.push(...batch);
+    instancePages.push(...pages);
+    await notify(2 + probed.length, total, `Probed ${probed.length} of ${reports.length} reports`);
+    if (stopWhen(instancePages)) break;
+  }
+
+  return { requests: requests.data, accessTypes, reports, probed, instancePages, excluded };
+};
+
+/**
+ * The report each category is usually being asked for.
+ *
+ * A category can hold several reports answering genuinely different questions —
+ * COMMERCE carries both "App Store Downloads" and "App Store Purchases" — so the
+ * pick is always reported alongside the alternatives rather than made silently.
+ * Refusing instead would recreate the four-hop walk for the commonest metric
+ * there is.
+ */
+const PREFERRED_REPORT: Record<string, string> = {
+  APP_STORE_ENGAGEMENT: "App Store Discovery and Engagement",
+  COMMERCE: "App Store Downloads",
+  APP_USAGE: "App Store Installations and Deletions",
+};
+
+/** Apple names the richer variant by suffix; Standard is the one without it. */
+const isDetailed = (name: string): boolean => /detailed/i.test(name);
+
+/**
+ * Analytics segments are comma-delimited while sales reports are tab-delimited,
+ * and reading a CSV with a tab splitter yields one column holding everything.
+ * Sniffed the same way report_stats.py does, rather than assumed per endpoint.
+ */
+const sniffDelimiter = (header: string): string =>
+  header.split("\t").length >= header.split(",").length ? "\t" : ",";
+
+/**
+ * The real date range inside a report, read out of its Date column.
+ *
+ * The same move `financeCoverage` makes for the fiscal trap. An instance's
+ * processingDate is when Apple GENERATED it, not what is inside it — a fresh
+ * ONE_TIME_SNAPSHOT reports today while holding a year of history — so the only
+ * honest answer to "which period did I actually get" comes from the data.
+ */
+const csvCoverage = (csv: string): { firstDate: string; lastDate: string; rows: number } | null => {
+  const lines = csv.split("\n").filter((line) => line.trim() !== "");
+  const header = lines[0];
+  if (header === undefined || lines.length < 2) return null;
+  const delimiter = sniffDelimiter(header);
+  const index = header.split(delimiter).findIndex((col) => col.trim().toLowerCase() === "date");
+  if (index === -1) return null;
+  const dates = lines
+    .slice(1)
+    .map((line) => (line.split(delimiter)[index] ?? "").trim())
+    .filter((date) => date !== "")
+    .toSorted();
+  if (dates.length === 0) return null;
+  return {
+    firstDate: dates[0] as string,
+    lastDate: dates[dates.length - 1] as string,
+    rows: lines.length - 1,
+  };
+};
+
+/**
+ * Join several segments into one report, dropping the header Apple repeats on
+ * each. A leftover header becomes a phantom data row and inflates every count.
+ */
+const concatSegments = (parts: string[]): string => {
+  const [first, ...rest] = parts;
+  if (first === undefined) return "";
+  // One segment is handed back byte for byte, trailing newline and all. Apple
+  // terminates every report with one, and previewReport's row counting is built
+  // around that — rewriting the bytes on the single-segment path would make the
+  // common case differ from the raw download for no reason.
+  if (rest.length === 0) return first;
+
+  const header = first.split("\n")[0];
+  const strip = (part: string): string => part.replace(/\n+$/, "");
+  const bodies = rest.map((part) => {
+    const lines = part.split("\n");
+    return strip(lines[0] === header ? lines.slice(1).join("\n") : part);
+  });
+  return `${[strip(first), ...bodies].filter((part) => part !== "").join("\n")}\n`;
+};
+
 export const registerReportTools = (
   server: McpServer,
   client: AppStoreConnectClient,
@@ -1607,36 +1810,15 @@ export const registerReportTools = (
     },
     async ({ appId, category, includeFrameworkUsage, maxReportsProbed, savePath }, req) =>
       wrapSaved(savePath, async () => {
-        /**
-         * Report progress, when the caller asked for it.
-         *
-         * This walk is the slowest thing the server does — three sequential
-         * stages, and Apple registers ~106 reports against a default probe of
-         * 20, so the third stage is several round trips on its own. Without
-         * this the caller sees nothing at all until the whole chain finishes.
-         *
-         * Silent when no token was sent: progress is something the client opts
-         * into per call, and emitting frames nobody asked for is traffic that
-         * ends up dropped at the other end.
-         */
-        const progressToken = req.mcpReq._meta?.progressToken;
-        // Two fixed stages ahead of the probe loop, so `progress` stays on one
-        // scale and strictly increases the way the spec requires.
-        const notify = async (progress: number, total: number, message: string) => {
-          if (progressToken === undefined) return;
-          await req.mcpReq.notify({
-            method: "notifications/progress",
-            params: { progressToken, progress, total, message },
-          });
-        };
+        const walk = await walkAnalytics(
+          client,
+          appId,
+          { category, includeFrameworkUsage, maxReportsProbed },
+          progressNotifier(req),
+        );
+        const { requests, accessTypes, reports, probed, instancePages, excluded } = walk;
 
-        await notify(0, 2, "Reading analytics report requests");
-        const requests = await client.getAll<Rec>(`/v1/apps/${appId}/analyticsReportRequests`, {
-          limit: 200,
-        });
-        const accessTypes = requests.data.map((request) => attributesOf(request).accessType);
-
-        if (requests.data.length === 0) {
+        if (requests.length === 0) {
           return {
             requests: 0,
             reports: 0,
@@ -1649,61 +1831,6 @@ export const registerReportTools = (
               "app_store_connect_create_analytics_report_request — both access types, since " +
               "ONGOING backfills nothing and only ONE_TIME_SNAPSHOT can reach the past.",
           };
-        }
-
-        await notify(1, 2, `Listing reports for ${requests.data.length} requests`);
-        const reportPages = await Promise.all(
-          requests.data.map((request) =>
-            client.getAll<Rec>(
-              `/v1/analyticsReportRequests/${request.id}/reports`,
-              compact({ "filter[category]": category, limit: 200 }),
-            ),
-          ),
-        );
-        const allReports = reportPages.flatMap((page) => page.data);
-
-        // Apple returns FRAMEWORK_USAGE for things like AirPlay discovery sessions
-        // on apps that never touch them, and it dominates the catalogue by count.
-        const excluded =
-          category === undefined && !includeFrameworkUsage
-            ? allReports.filter((report) => attributesOf(report).category === "FRAMEWORK_USAGE")
-                .length
-            : 0;
-        const reports =
-          category === undefined && !includeFrameworkUsage
-            ? allReports.filter((report) => attributesOf(report).category !== "FRAMEWORK_USAGE")
-            : allReports;
-
-        /**
-         * Probe in batches, and keep going while the answer is still zero.
-         *
-         * A bounded walk makes every count a floor, and a floor of zero answers
-         * nothing — which is a problem, because "is there any data yet" is the
-         * question this tool exists for, and Apple registers ~106 reports against
-         * a default of 20. Once a single instance has been found the cap is
-         * harmless: the caller knows data exists and the floor caveat covers the
-         * rest. Until then it is the whole answer, so it is worth the extra calls.
-         */
-        const probed: Rec[] = [];
-        const instancePages: { data: Rec[] }[] = [];
-        // The two fixed stages above are already counted, so the loop's own
-        // total is offset by them rather than restarting at zero.
-        const total = 2 + reports.length;
-        while (probed.length < reports.length) {
-          const batch = reports.slice(probed.length, probed.length + maxReportsProbed);
-          const pages = await Promise.all(
-            batch.map((report) =>
-              client.getAll<Rec>(`/v1/analyticsReports/${report.id}/instances`, { limit: 200 }),
-            ),
-          );
-          probed.push(...batch);
-          instancePages.push(...pages);
-          await notify(
-            2 + probed.length,
-            total,
-            `Probed ${probed.length} of ${reports.length} reports`,
-          );
-          if (instancePages.some((page) => page.data.length > 0)) break;
         }
 
         const byCategory: Record<string, { reports: number; instances: number }> = {};
@@ -1728,7 +1855,7 @@ export const registerReportTools = (
 
         const unprobed = reports.length - probed.length;
         return {
-          requests: requests.data.length,
+          requests: requests.length,
           accessTypes,
           reports: reports.length,
           instances,
@@ -1777,6 +1904,320 @@ export const registerReportTools = (
                 "data still matters."
               : undefined,
           }),
+        };
+      }),
+  );
+
+  server.registerTool(
+    "app_store_connect_get_analytics_report",
+    {
+      title: "App Store Connect: Get Analytics Report",
+      description:
+        "Get the actual analytics numbers for an app in ONE call — impressions, product page " +
+        "views, conversion, downloads, installs, deletions, sessions, proceeds — instead of the " +
+        "four-step walk (list requests, list reports, list instances, list segments, download). " +
+        "Picks the report and instance itself and says which it picked, in `selection`, with the " +
+        "alternatives it passed over. Returns `coverage` read from the data's own Date column, " +
+        "which is the only honest answer to which period you got: an instance's processingDate " +
+        "is when Apple GENERATED it, and a fresh ONE_TIME_SNAPSHOT reports today while holding a " +
+        "year of history. Use app_store_connect_get_analytics_status first if the question is " +
+        'merely "is there any data yet". This tool does not create a report request — that is a ' +
+        "write, and creating the wrong access type loses history permanently.",
+      inputSchema: z.object({
+        appId: appIdArg,
+        category: z
+          .enum(REPORT_CATEGORIES)
+          .describe(
+            "Required — it decides WHICH numbers you get, and defaulting it would silently pick " +
+              "a dataset out of ~106. APP_STORE_ENGAGEMENT covers impressions, product page " +
+              "views and conversion; COMMERCE covers downloads and proceeds; APP_USAGE covers " +
+              "installs, deletions, sessions and retention.",
+          ),
+        reportName: z
+          .string()
+          .optional()
+          .describe(
+            'Exact report name, e.g. "App Store Purchases". Omit to let the category decide; ' +
+              "the response always says which was chosen and what else was available.",
+          ),
+        detailed: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Prefer the Detailed variant, which adds Source Info, Page Title and Campaign — " +
+              "needed to attribute anything to a specific referrer. Defaults to Standard.",
+          ),
+        granularity: z.enum(GRANULARITIES).default("DAILY").describe("Instance granularity."),
+        processingDate: z
+          .string()
+          .optional()
+          .describe(
+            "Pick the instance Apple generated on this date (YYYY-MM-DD). NOT the date of the " +
+              "data inside it. Omit for the most recent instance.",
+          ),
+        accessType: z
+          .enum(["ONE_TIME_SNAPSHOT", "ONGOING", "ANY"])
+          .optional()
+          .describe(
+            "Which request to read from. Defaults to ONE_TIME_SNAPSHOT for MONTHLY, the " +
+              "documented-safe side: an ONGOING monthly instance has been seen holding every row " +
+              "of its month twice.",
+          ),
+        allSegments: z
+          .boolean()
+          .default(true)
+          .describe(
+            "Download every segment and concatenate them. Defaults to true, because the failure " +
+              "of taking only the first is a silent undercount.",
+          ),
+        maxReportsProbed: z.number().int().min(1).max(100).default(20),
+        maxLines: z
+          .number()
+          .int()
+          .min(1)
+          .max(5000)
+          .default(500)
+          .describe("Truncate the inlined rows. Does not affect the file written by savePath."),
+        maxBytes: z
+          .number()
+          .int()
+          .min(1)
+          .default(DEFAULT_MAX_SEGMENT_BYTES)
+          .describe(
+            "Refuse the download when the segments' TOTAL compressed size exceeds this, before " +
+              "fetching anything. Defaults to 25 MiB.",
+          ),
+        savePath: reportSavePathArg,
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async (
+      {
+        appId,
+        category,
+        reportName,
+        detailed,
+        granularity,
+        processingDate,
+        accessType,
+        allSegments,
+        maxReportsProbed,
+        maxLines,
+        maxBytes,
+        savePath,
+      },
+      req,
+    ) =>
+      wrap(async () => {
+        const notify = progressNotifier(req);
+        // MONTHLY defaults to the snapshot: an ONGOING monthly instance was seen
+        // holding every row of its month twice, reporting 7,764 impressions where
+        // the snapshot held 3,882, on three apps at once.
+        const wantedAccess =
+          accessType ?? (granularity === "MONTHLY" ? "ONE_TIME_SNAPSHOT" : undefined);
+
+        const walk = await walkAnalytics(
+          client,
+          appId,
+          {
+            category,
+            includeFrameworkUsage: true,
+            maxReportsProbed,
+            instanceQuery: compact({
+              "filter[granularity]": granularity,
+              "filter[processingDate]": processingDate,
+            }),
+            // Unlike the status walk, an instance is only useful if it belongs to
+            // a report we would actually pick.
+            stopWhen: (pages) => pages.some((page) => page.data.length > 0),
+          },
+          notify,
+        );
+
+        if (walk.requests.length === 0) {
+          return {
+            empty: true,
+            reason: "NO_REPORT_REQUEST",
+            writesEnabled: ctx.allowWrites,
+            note:
+              "This app has no analytics report request, so Apple is collecting nothing for it. " +
+              "Create one with app_store_connect_create_analytics_report_request — both access " +
+              "types, since ONGOING backfills nothing and only ONE_TIME_SNAPSHOT reaches the " +
+              "past. This tool will not create it: that is a write, and creating only ONGOING " +
+              "forfeits the app's entire history permanently and invisibly." +
+              (ctx.allowWrites ? "" : " Writes are currently disabled on this server."),
+          };
+        }
+
+        // Which request each report belongs to, so accessType can be honoured.
+        const accessOf = new Map(
+          walk.requests.map((request) => [
+            String(request.id),
+            String(attributesOf(request).accessType ?? ""),
+          ]),
+        );
+
+        const named = walk.probed.filter((report) => {
+          const attrs = attributesOf(report);
+          if (reportName !== undefined) return attrs.name === reportName;
+          return true;
+        });
+        if (reportName !== undefined && named.length === 0) {
+          throw new PreconditionError(
+            `No report named "${reportName}" in category ${category} for this app.`,
+            {
+              reportName,
+              available: [
+                ...new Set(walk.probed.map((r) => String(attributesOf(r).name ?? ""))),
+              ].toSorted(),
+            },
+          );
+        }
+
+        // Standard vs Detailed, then the category's usual answer.
+        const variant = named.filter(
+          (report) => isDetailed(String(attributesOf(report).name ?? "")) === detailed,
+        );
+        const pool = variant.length > 0 ? variant : named;
+        const preferred = PREFERRED_REPORT[category];
+        const byName =
+          reportName === undefined && preferred !== undefined
+            ? pool.filter((report) => String(attributesOf(report).name ?? "").startsWith(preferred))
+            : pool;
+        let candidates = byName.length > 0 ? byName : pool;
+
+        const wanted = candidates.filter((report) => {
+          if (wantedAccess === undefined || wantedAccess === "ANY") return true;
+          const requestId = relatedId(report, "analyticsReportRequest");
+          return requestId === undefined || accessOf.get(requestId) === wantedAccess;
+        });
+        if (wanted.length > 0) candidates = wanted;
+
+        // Only reports that actually have an instance at this granularity.
+        const withInstances = candidates.filter((report) => {
+          const index = walk.probed.indexOf(report);
+          return (walk.instancePages[index]?.data.length ?? 0) > 0;
+        });
+
+        if (withInstances.length === 0) {
+          return {
+            empty: true,
+            reason: candidates.length === 0 ? "NO_MATCHING_REPORT" : "NO_INSTANCES_FOR_GRANULARITY",
+            granularity,
+            reportsConsidered: candidates.map((r) => attributesOf(r).name),
+            reportsProbed: walk.probed.length,
+            reportsTotal: walk.reports.length,
+            note:
+              `No ${granularity} instance exists for the report(s) matching this request` +
+              (processingDate === undefined ? "" : ` on processingDate ${processingDate}`) +
+              ". Not every report offers all three granularities, and Apple generates instances " +
+              "a day or two after a request is created. Try another granularity, or " +
+              "app_store_connect_get_analytics_status to see what does exist." +
+              (walk.probed.length < walk.reports.length
+                ? ` Only ${walk.probed.length} of ${walk.reports.length} reports were probed, so ` +
+                  `this is a floor — raise maxReportsProbed.`
+                : ""),
+          };
+        }
+
+        const chosen = withInstances[0] as Rec;
+        const chosenIndex = walk.probed.indexOf(chosen);
+        const chosenAttrs = attributesOf(chosen);
+        const chosenRequestId = relatedId(chosen, "analyticsReportRequest");
+
+        // Newest instance unless the caller named a processing date.
+        const instances = (walk.instancePages[chosenIndex]?.data ?? []).toSorted((a, b) =>
+          String(attributesOf(b).processingDate ?? "").localeCompare(
+            String(attributesOf(a).processingDate ?? ""),
+          ),
+        );
+        const instance = instances[0] as Rec;
+
+        await notify(3, 5, "Listing segments");
+        const segmentsResponse = await client.get(
+          `/v1/analyticsReportInstances/${String(instance.id)}/segments`,
+        );
+        const segments = resourcesOf(segmentsResponse);
+        if (segments.length === 0) {
+          return {
+            empty: true,
+            reason: "INSTANCE_HAS_NO_SEGMENTS",
+            instanceId: instance.id,
+            note:
+              "Apple has registered this instance but not yet written its data, or it holds " +
+              "nothing for that date. Try an earlier processingDate.",
+          };
+        }
+
+        const wantedSegments = allSegments ? segments : segments.slice(0, 1);
+        // The TOTAL, not each: a per-segment check waves through ten 20 MiB files.
+        const totalBytes = wantedSegments.reduce((sum, segment) => {
+          const size = attributesOf(segment).sizeInBytes;
+          return sum + (typeof size === "number" ? size : 0);
+        }, 0);
+        if (totalBytes > maxBytes) {
+          throw new PreconditionError(
+            `These ${wantedSegments.length} segment(s) are ${totalBytes} bytes compressed in ` +
+              `total, over the ${maxBytes} byte limit. Raise maxBytes to fetch them anyway, or ` +
+              `pick a narrower instance (a DAILY granularity covers far less than MONTHLY).`,
+            { instanceId: instance.id, segments: wantedSegments.length, totalBytes, maxBytes },
+          );
+        }
+
+        await notify(4, 5, `Downloading ${wantedSegments.length} segment(s)`);
+        const parts: string[] = [];
+        for (const segment of wantedSegments) {
+          const url = attributesOf(segment).url;
+          if (typeof url !== "string" || url === "") {
+            throw new PreconditionError("A segment came back without a download url.", {
+              instanceId: instance.id,
+            });
+          }
+          parts.push(await client.downloadSignedFile(url));
+        }
+        // Segments repeat the header; a leftover one becomes a phantom data row.
+        const csv = concatSegments(parts);
+        await notify(5, 5, "Done");
+
+        const alternatives = [
+          ...new Set(
+            walk.probed
+              .filter((report) => report !== chosen)
+              .map((report) => String(attributesOf(report).name ?? "")),
+          ),
+        ].toSorted();
+
+        return {
+          selection: {
+            reportId: chosen.id,
+            reportName: chosenAttrs.name,
+            category: chosenAttrs.category,
+            accessType: chosenRequestId === undefined ? undefined : accessOf.get(chosenRequestId),
+            instanceId: instance.id,
+            granularity: attributesOf(instance).granularity,
+            processingDate: attributesOf(instance).processingDate,
+            chosenFrom: withInstances.length,
+            ...(alternatives.length > 0 ? { alternatives } : {}),
+          },
+          segments: { downloaded: wantedSegments.length, of: segments.length, totalBytes },
+          // Read from the data, not from the instance: processingDate is when
+          // Apple generated it and says nothing about what is inside.
+          coverage: csvCoverage(csv),
+          ...(!allSegments && segments.length > 1
+            ? {
+                segmentsNote:
+                  `Only 1 of ${segments.length} segments was downloaded, so every total below is ` +
+                  `a floor. Set allSegments to get the whole instance.`,
+              }
+            : {}),
+          ...(walk.probed.length < walk.reports.length
+            ? {
+                probeNote:
+                  `${walk.probed.length} of ${walk.reports.length} reports were probed. The one ` +
+                  `chosen is real; other candidates may not have been seen.`,
+              }
+            : {}),
+          ...(await previewAndSave(csv, maxLines, savePath)),
         };
       }),
   );

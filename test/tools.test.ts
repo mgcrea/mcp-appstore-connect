@@ -4544,3 +4544,351 @@ describe("multi-app reads", () => {
     expect(body.note).toBeUndefined();
   });
 });
+
+/**
+ * The four-hop walk — create request, list reports, list instances, list
+ * segments, download — done once, per app per metric. This collapses it, and
+ * the risk of collapsing it is that the picks become invisible: which of ~106
+ * reports, which access type, which instance. Every one of those is reported.
+ */
+describe("get_analytics_report", () => {
+  const REQ = "req-1";
+  const SEGMENT_URL = "https://api-reports.apple.com/seg-1";
+  const CSV = "Date,Impressions\n2026-06-01,120\n2026-06-02,140\n";
+
+  const report = (id: string, name: string, category: string, requestId = REQ): unknown => ({
+    type: "analyticsReports",
+    id,
+    attributes: { name, category },
+    relationships: {
+      analyticsReportRequest: { data: { type: "analyticsReportRequests", id: requestId } },
+    },
+  });
+
+  const instance = (id: string, granularity = "DAILY", processingDate = "2026-06-03"): unknown => ({
+    type: "analyticsReportInstances",
+    id,
+    attributes: { granularity, processingDate },
+  });
+
+  /** The five hops, routed by URL. */
+  const walk = (opts: {
+    requests?: unknown[];
+    reports?: unknown[];
+    instances?: Record<string, unknown[]>;
+    segments?: unknown[];
+    csv?: string;
+  }): ReturnType<typeof vi.fn> =>
+    vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.startsWith(SEGMENT_URL)) {
+        return new Response(gzipSync(Buffer.from(opts.csv ?? CSV)), { status: 200 });
+      }
+      if (u.includes("/analyticsReportRequests") && u.includes("/v1/apps/")) {
+        return jsonResponse({
+          data: opts.requests ?? [
+            {
+              type: "analyticsReportRequests",
+              id: REQ,
+              attributes: { accessType: "ONE_TIME_SNAPSHOT" },
+            },
+          ],
+        });
+      }
+      if (u.includes("/reports")) return jsonResponse({ data: opts.reports ?? [] });
+      if (u.includes("/instances")) {
+        const id = /analyticsReports\/([^/?]+)/.exec(u)?.[1] ?? "";
+        return jsonResponse({ data: opts.instances?.[id] ?? [] });
+      }
+      if (u.includes("/segments")) {
+        return jsonResponse({
+          data: opts.segments ?? [
+            {
+              type: "analyticsReportSegments",
+              id: "seg-1",
+              attributes: { url: SEGMENT_URL, sizeInBytes: 512, checksum: "abc" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unrouted: ${u}`);
+    });
+
+  const call = async (
+    fetchImpl: ReturnType<typeof vi.fn>,
+    args: Record<string, unknown>,
+  ): Promise<Awaited<ReturnType<Client["callTool"]>>> => {
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    return client.callTool({
+      name: "app_store_connect_get_analytics_report",
+      arguments: { appId: "1", category: "APP_STORE_ENGAGEMENT", ...args },
+    });
+  };
+
+  it("reaches the numbers in five calls and says what it picked", async () => {
+    const fetchImpl = walk({
+      reports: [report("r1", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT")],
+      instances: { r1: [instance("i1")] },
+    });
+
+    const body = payloadOf(await call(fetchImpl, {})) as {
+      selection: Record<string, unknown>;
+      coverage: Record<string, unknown>;
+      report: string;
+    };
+
+    // requests -> reports -> instances -> segments -> the signed download.
+    expect(fetchImpl.mock.calls).toHaveLength(5);
+    expect(body.selection).toMatchObject({
+      reportId: "r1",
+      reportName: "App Store Discovery and Engagement",
+      accessType: "ONE_TIME_SNAPSHOT",
+      instanceId: "i1",
+    });
+    expect(body.report).toBe(CSV);
+  });
+
+  it("filters by category and granularity at Apple, not locally", async () => {
+    const fetchImpl = walk({
+      reports: [report("r1", "App Store Downloads", "COMMERCE")],
+      instances: { r1: [instance("i1", "WEEKLY")] },
+    });
+    await call(fetchImpl, { category: "COMMERCE", granularity: "WEEKLY" });
+
+    const reportsUrl = new URL(
+      fetchImpl.mock.calls.map((c) => String(c[0])).find((u) => u.includes("/reports")) ?? "",
+    );
+    expect(reportsUrl.searchParams.get("filter[category]")).toBe("COMMERCE");
+    const instancesUrl = new URL(
+      fetchImpl.mock.calls.map((c) => String(c[0])).find((u) => u.includes("/instances")) ?? "",
+    );
+    expect(instancesUrl.searchParams.get("filter[granularity]")).toBe("WEEKLY");
+  });
+
+  it("prefers Standard over Detailed, and flips on request", async () => {
+    const reports = [
+      report("r1", "App Store Discovery and Engagement Detailed", "APP_STORE_ENGAGEMENT"),
+      report("r2", "App Store Discovery and Engagement Standard", "APP_STORE_ENGAGEMENT"),
+    ];
+    const instances = { r1: [instance("i1")], r2: [instance("i2")] };
+
+    const standard = payloadOf(await call(walk({ reports, instances }), {})) as {
+      selection: { reportId: string; alternatives: string[] };
+    };
+    expect(standard.selection.reportId).toBe("r2");
+    // The pick is never silent — what it passed over is named.
+    expect(standard.selection.alternatives).toContain(
+      "App Store Discovery and Engagement Detailed",
+    );
+
+    const detailed = payloadOf(await call(walk({ reports, instances }), { detailed: true })) as {
+      selection: { reportId: string };
+    };
+    expect(detailed.selection.reportId).toBe("r1");
+  });
+
+  /**
+   * COMMERCE holds both Downloads and Purchases, which answer different
+   * questions. It picks, but never silently.
+   */
+  it("names the alternatives when a category holds several reports", async () => {
+    const fetchImpl = walk({
+      reports: [
+        report("r1", "App Store Purchases", "COMMERCE"),
+        report("r2", "App Store Downloads", "COMMERCE"),
+      ],
+      instances: { r1: [instance("i1")], r2: [instance("i2")] },
+    });
+
+    const body = payloadOf(await call(fetchImpl, { category: "COMMERCE" })) as {
+      selection: { reportName: string; alternatives: string[] };
+    };
+
+    expect(body.selection.reportName).toBe("App Store Downloads");
+    expect(body.selection.alternatives).toContain("App Store Purchases");
+  });
+
+  it("refuses a reportName that does not exist rather than guessing", async () => {
+    const fetchImpl = walk({
+      reports: [report("r1", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT")],
+      instances: { r1: [instance("i1")] },
+    });
+
+    const result = await call(fetchImpl, { reportName: "App Store Nonsense" });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("App Store Discovery and Engagement");
+    // Nothing was downloaded on the way to refusing.
+    expect(fetchImpl.mock.calls.some((c) => String(c[0]).startsWith(SEGMENT_URL))).toBe(false);
+  });
+
+  /**
+   * The doubled-month hazard: an ONGOING monthly instance was seen holding every
+   * row of its month twice. MONTHLY defaults to the snapshot for that reason.
+   */
+  it("defaults MONTHLY to the snapshot request", async () => {
+    const fetchImpl = walk({
+      requests: [
+        { type: "analyticsReportRequests", id: "ongoing", attributes: { accessType: "ONGOING" } },
+        {
+          type: "analyticsReportRequests",
+          id: "snap",
+          attributes: { accessType: "ONE_TIME_SNAPSHOT" },
+        },
+      ],
+      reports: [
+        report("r1", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT", "ongoing"),
+        report("r2", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT", "snap"),
+      ],
+      instances: { r1: [instance("i1", "MONTHLY")], r2: [instance("i2", "MONTHLY")] },
+    });
+
+    const body = payloadOf(await call(fetchImpl, { granularity: "MONTHLY" })) as {
+      selection: { accessType: string; instanceId: string };
+    };
+
+    expect(body.selection.accessType).toBe("ONE_TIME_SNAPSHOT");
+    expect(body.selection.instanceId).toBe("i2");
+  });
+
+  it("reads coverage out of the data's own Date column", async () => {
+    const fetchImpl = walk({
+      reports: [report("r1", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT")],
+      // processingDate says the instance was generated in June; the data inside
+      // reaches back to January, and only the data can say so.
+      instances: { r1: [instance("i1", "DAILY", "2026-06-03")] },
+      csv: "Date,Impressions\n2026-01-05,10\n2026-05-30,20\n",
+    });
+
+    const body = payloadOf(await call(fetchImpl, {})) as {
+      coverage: { firstDate: string; lastDate: string; rows: number };
+      selection: { processingDate: string };
+    };
+
+    expect(body.selection.processingDate).toBe("2026-06-03");
+    expect(body.coverage).toEqual({ firstDate: "2026-01-05", lastDate: "2026-05-30", rows: 2 });
+  });
+
+  it("reads coverage from a tab-delimited body too", async () => {
+    const fetchImpl = walk({
+      reports: [report("r1", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT")],
+      instances: { r1: [instance("i1")] },
+      csv: "Date\tImpressions\n2026-02-01\t10\n",
+    });
+
+    const body = payloadOf(await call(fetchImpl, {})) as { coverage: { firstDate: string } };
+
+    // Analytics segments are comma-delimited and sales reports tab-delimited;
+    // a hardcoded splitter yields one column holding everything.
+    expect(body.coverage.firstDate).toBe("2026-02-01");
+  });
+
+  it("joins segments without repeating the header", async () => {
+    let n = 0;
+    const base = walk({
+      reports: [report("r1", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT")],
+      instances: { r1: [instance("i1")] },
+      segments: [
+        {
+          type: "analyticsReportSegments",
+          id: "s1",
+          attributes: { url: `${SEGMENT_URL}?p=1`, sizeInBytes: 10 },
+        },
+        {
+          type: "analyticsReportSegments",
+          id: "s2",
+          attributes: { url: `${SEGMENT_URL}?p=2`, sizeInBytes: 10 },
+        },
+      ],
+    });
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (String(url).startsWith(SEGMENT_URL)) {
+        n += 1;
+        const body =
+          n === 1 ? "Date,Impressions\n2026-06-01,120\n" : "Date,Impressions\n2026-06-02,140\n";
+        return new Response(gzipSync(Buffer.from(body)), { status: 200 });
+      }
+      return (base as unknown as (u: string) => Promise<Response>)(url);
+    });
+
+    const body = payloadOf(await call(fetchImpl, {})) as {
+      dataRows: number;
+      duplicateRows?: number;
+      segments: { downloaded: number; of: number };
+    };
+
+    // Two data rows, not three: the repeated header would have become a phantom.
+    expect(body.dataRows).toBe(2);
+    expect(body.duplicateRows).toBeUndefined();
+    expect(body.segments).toMatchObject({ downloaded: 2, of: 2 });
+  });
+
+  it("checks the segments' total size, not each one, before fetching", async () => {
+    const fetchImpl = walk({
+      reports: [report("r1", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT")],
+      instances: { r1: [instance("i1")] },
+      segments: [
+        {
+          type: "analyticsReportSegments",
+          id: "s1",
+          attributes: { url: `${SEGMENT_URL}?p=1`, sizeInBytes: 600 },
+        },
+        {
+          type: "analyticsReportSegments",
+          id: "s2",
+          attributes: { url: `${SEGMENT_URL}?p=2`, sizeInBytes: 600 },
+        },
+      ],
+    });
+
+    // Each segment is under the cap; together they are over it. A per-segment
+    // check would wave this through.
+    const result = await call(fetchImpl, { maxBytes: 1000 });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("1200 bytes compressed in total");
+    expect(fetchImpl.mock.calls.some((c) => String(c[0]).startsWith(SEGMENT_URL))).toBe(false);
+  });
+
+  it("will not create the report request, and says why", async () => {
+    const fetchImpl = walk({ requests: [] });
+
+    const body = payloadOf(await call(fetchImpl, {})) as {
+      empty: boolean;
+      reason: string;
+      writesEnabled: boolean;
+      note: string;
+    };
+
+    expect(body.empty).toBe(true);
+    expect(body.reason).toBe("NO_REPORT_REQUEST");
+    expect(body.writesEnabled).toBe(false);
+    expect(body.note).toContain("app_store_connect_create_analytics_report_request");
+    // Creating only ONGOING loses the past permanently, so it is not a getter's
+    // decision to make on the caller's behalf.
+    expect(body.note).toContain("ONGOING backfills nothing");
+  });
+
+  it("names the granularities problem rather than returning nothing", async () => {
+    const fetchImpl = walk({
+      reports: [report("r1", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT")],
+      instances: {},
+    });
+
+    const body = payloadOf(await call(fetchImpl, { granularity: "MONTHLY" })) as {
+      empty: boolean;
+      reason: string;
+      note: string;
+    };
+
+    expect(body.empty).toBe(true);
+    expect(body.reason).toBe("NO_INSTANCES_FOR_GRANULARITY");
+    expect(body.note).toContain("not every report offers all three granularities".slice(4));
+  });
+
+  it("registers in read-only mode", async () => {
+    expect(await toolNames(await connect(baseConfig))).toContain(
+      "app_store_connect_get_analytics_report",
+    );
+  });
+});
