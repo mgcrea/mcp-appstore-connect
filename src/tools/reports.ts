@@ -11,8 +11,10 @@ import {
   limitArg,
   PreconditionError,
   type SavedFile,
+  savePathArg,
   saveToPath,
   wrap,
+  wrapSaved,
 } from "#/tools/util";
 
 const FREQUENCIES = ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"] as const;
@@ -121,8 +123,10 @@ export const previewReport = (tsv: string, maxLines: number): Record<string, unk
   };
 };
 
-/** The argument every report-download tool takes, described once. */
-const savePathArg = z
+/** The argument every report-DOWNLOAD tool takes, described once. Distinct from
+ * the terse `savePathArg` every read shares: these three write the raw TSV/CSV,
+ * and the completeness guarantee is the whole reason to reach for them. */
+const reportSavePathArg = z
   .string()
   .optional()
   .describe(
@@ -680,11 +684,12 @@ export const registerReportTools = (
             "Download one throwaway daily report to confirm Apple accepts the number. " +
               "Set false to read the configuration without calling Apple.",
           ),
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ vendorNumber, verify }) =>
-      wrap(async () => {
+    async ({ vendorNumber, verify, savePath }) =>
+      wrapSaved(savePath, async () => {
         const vendor = vendorNumber ?? ctx.vendorNumber;
         if (!vendor) {
           return {
@@ -793,7 +798,7 @@ export const registerReportTools = (
             "Truncate the inlined TSV to this many lines. Defaults to 500. Does not affect the " +
               "file written by savePath.",
           ),
-        savePath: savePathArg,
+        savePath: reportSavePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
@@ -886,7 +891,7 @@ export const registerReportTools = (
             "Truncate the inlined TSV to this many lines. Defaults to 500. Does not affect the " +
               "file written by savePath.",
           ),
-        savePath: savePathArg,
+        savePath: reportSavePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
@@ -943,11 +948,12 @@ export const registerReportTools = (
           .optional()
           .describe("Filter by access type. Omit to list both."),
         limit: limitArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appId, accessType, limit }) =>
-      wrap(async () =>
+    async ({ appId, accessType, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(
             `/v1/apps/${appId}/analyticsReportRequests`,
@@ -987,11 +993,12 @@ export const registerReportTools = (
           .optional()
           .describe('Filter by exact report name, e.g. "App Store Installation and Deletion".'),
         limit: limitArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ reportRequestId, category, name, limit }) =>
-      wrap(async () =>
+    async ({ reportRequestId, category, name, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(
             `/v1/analyticsReportRequests/${reportRequestId}/reports`,
@@ -1025,11 +1032,12 @@ export const registerReportTools = (
           .optional()
           .describe("Filter to one processing date, as YYYY-MM-DD."),
         limit: limitArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ reportId, granularity, processingDate, limit }) =>
-      wrap(async () =>
+    async ({ reportId, granularity, processingDate, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(
             `/v1/analyticsReports/${reportId}/instances`,
@@ -1061,11 +1069,12 @@ export const registerReportTools = (
               "app_store_connect_list_analytics_report_instances.",
           ),
         limit: limitArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ instanceId, limit }) =>
-      wrap(async () =>
+    async ({ instanceId, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(
             `/v1/analyticsReportInstances/${instanceId}/segments`,
@@ -1118,7 +1127,7 @@ export const registerReportTools = (
             "Refuse a segment whose compressed size exceeds this, before downloading it. " +
               "Defaults to 25 MiB.",
           ),
-        savePath: savePathArg,
+        savePath: reportSavePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
@@ -1218,11 +1227,12 @@ export const registerReportTools = (
               "is found or every report has been checked — so a zero is never a floor, which " +
               'is what makes this tool answerable for "is there any data yet".',
           ),
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appId, category, includeFrameworkUsage, maxReportsProbed }, req) =>
-      wrap(async () => {
+    async ({ appId, category, includeFrameworkUsage, maxReportsProbed, savePath }, req) =>
+      wrapSaved(savePath, async () => {
         /**
          * Report progress, when the caller asked for it.
          *

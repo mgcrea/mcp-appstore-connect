@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
 import { summarizeResponse } from "#/client/shape";
-import { appIdArg, compact, limitArg, wrap } from "#/tools/util";
+import { appIdArg, compact, limitArg, savePathArg, wrapSaved } from "#/tools/util";
 
 export const registerBuildTools = (
   server: McpServer,
@@ -35,11 +35,12 @@ export const registerBuildTools = (
           .optional()
           .describe("Filter by processing state. VALID builds are ready to use."),
         limit: limitArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appId, version, processingState, limit }) =>
-      wrap(async () =>
+    async ({ appId, version, processingState, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(
             "/v1/builds",

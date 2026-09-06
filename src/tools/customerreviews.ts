@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
 import { summarizeResponse } from "#/client/shape";
-import { appIdArg, compact, limitArg, territoryArg, wrap } from "#/tools/util";
+import { appIdArg, compact, limitArg, savePathArg, territoryArg, wrapSaved } from "#/tools/util";
 
 export const registerCustomerReviewTools = (
   server: McpServer,
@@ -39,11 +39,12 @@ export const registerCustomerReviewTools = (
               "for both.",
           ),
         limit: limitArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appId, rating, territory, sort, answered, limit }) =>
-      wrap(async () =>
+    async ({ appId, rating, territory, sort, answered, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(
             `/v1/apps/${appId}/customerReviews`,

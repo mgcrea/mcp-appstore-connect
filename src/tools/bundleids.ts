@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
 import { summarizeResponse } from "#/client/shape";
-import { compact, confirmArg, limitArg, wrap } from "#/tools/util";
+import { compact, confirmArg, limitArg, savePathArg, wrap, wrapSaved } from "#/tools/util";
 
 const BUNDLE_PLATFORMS = ["IOS", "MAC_OS", "UNIVERSAL"] as const;
 
@@ -30,11 +30,12 @@ export const registerBundleIdTools = (
         identifier: z.string().optional().describe('Filter by identifier, e.g. "com.acme.app".'),
         platform: z.enum(BUNDLE_PLATFORMS).optional().describe("Filter by platform."),
         limit: limitArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ identifier, platform, limit }) =>
-      wrap(async () =>
+    async ({ identifier, platform, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(
             "/v1/bundleIds",
@@ -53,11 +54,13 @@ export const registerBundleIdTools = (
     {
       title: "App Store Connect: Get Bundle ID",
       description: "Get one bundle id's attributes by its resource id.",
-      inputSchema: z.object({ bundleId: bundleIdArg }),
+      inputSchema: z.object({ bundleId: bundleIdArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
-    async ({ bundleId }) =>
-      wrap(async () => summarizeResponse(await client.get(`/v1/bundleIds/${bundleId}`))),
+    async ({ bundleId, savePath }) =>
+      wrapSaved(savePath, async () =>
+        summarizeResponse(await client.get(`/v1/bundleIds/${bundleId}`)),
+      ),
   );
 
   if (!allowWrites) return;

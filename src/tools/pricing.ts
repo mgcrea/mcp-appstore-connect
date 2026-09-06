@@ -11,14 +11,16 @@ import {
   summarizeResponse,
 } from "#/client/shape";
 import {
-  PreconditionError,
   appIdArg,
   compact,
   confirmArg,
   getOrNull,
   limitArg,
+  PreconditionError,
+  savePathArg,
   territoryArg,
   wrap,
+  wrapSaved,
 } from "#/tools/util";
 
 // The app's OWN price is a separate resource from any in-app purchase's, and
@@ -145,11 +147,12 @@ export const registerPricingTools = (
             "one you pass here must be the same territory you later set as baseTerritory.",
         ),
         limit: limitArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appId, territory, limit }) =>
-      wrap(async () =>
+    async ({ appId, territory, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(
             `/v1/apps/${appId}/appPricePoints`,
@@ -169,11 +172,11 @@ export const registerPricingTools = (
         "customerPrice of 0 is how a free app is priced. A null result means the app has never " +
         "been priced, which blocks submission — this is the check for " +
         "STATE_ERROR.APP_PRICING_REQUIRED.",
-      inputSchema: z.object({ appId: appIdArg }),
+      inputSchema: z.object({ appId: appIdArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appId }) =>
-      wrap(async () => {
+    async ({ appId, savePath }) =>
+      wrapSaved(savePath, async () => {
         // The schedule resource carries nothing but relationships, so a price is
         // only legible once its price point is sideloaded — and that sideload is
         // not available here, only on the manualPrices endpoint. See

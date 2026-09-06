@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
 import { summarizeResponse } from "#/client/shape";
-import { compact, limitArg, wrap } from "#/tools/util";
+import { compact, limitArg, savePathArg, wrapSaved } from "#/tools/util";
 
 export const registerUserTools = (
   server: McpServer,
@@ -20,11 +20,12 @@ export const registerUserTools = (
       inputSchema: z.object({
         username: z.string().optional().describe("Filter by username (Apple ID email)."),
         limit: limitArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ username, limit }) =>
-      wrap(async () =>
+    async ({ username, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get("/v1/users", compact({ "filter[username]": username, limit })),
         ),

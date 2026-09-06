@@ -10,14 +10,16 @@ import {
   summarizeResponse,
 } from "#/client/shape";
 import {
-  PLATFORMS,
-  PreconditionError,
   appIdArg,
   compact,
   confirmArg,
   limitArg,
+  PLATFORMS,
+  PreconditionError,
+  savePathArg,
   versionIdArg,
   wrap,
+  wrapSaved,
 } from "#/tools/util";
 
 const localizationIdArg = z
@@ -220,11 +222,12 @@ export const registerVersionTools = (
           .describe('Filter by review state, e.g. "READY_FOR_SALE".'),
         versionString: z.string().optional().describe('Filter to one version, e.g. "1.2.0".'),
         limit: limitArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appId, platform, appStoreState, versionString, limit }) =>
-      wrap(async () =>
+    async ({ appId, platform, appStoreState, versionString, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(
             `/v1/apps/${appId}/appStoreVersions`,
@@ -249,11 +252,11 @@ export const registerVersionTools = (
         "returns attributes only, so the build link is invisible there. Use it before submitting: " +
         "a version whose build predates your latest work ships that older binary, and the build's " +
         "uploadedDate is what tells you. `build` is null when nothing is attached yet.",
-      inputSchema: z.object({ versionId: versionIdArg }),
+      inputSchema: z.object({ versionId: versionIdArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
-    async ({ versionId }) =>
-      wrap(async () => {
+    async ({ versionId, savePath }) =>
+      wrapSaved(savePath, async () => {
         // The build lives in `relationships` and `included`, both of which
         // summarizeResponse drops — hence the hand-built shape.
         const response = await client.get(`/v1/appStoreVersions/${versionId}`, {
@@ -284,11 +287,11 @@ export const registerVersionTools = (
       description:
         "List the per-locale metadata rows for one App Store version (each carries description, " +
         "keywords, what's-new, promotional text). Returns the localization ids you update.",
-      inputSchema: z.object({ versionId: versionIdArg, limit: limitArg }),
+      inputSchema: z.object({ versionId: versionIdArg, limit: limitArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
-    async ({ versionId, limit }) =>
-      wrap(async () =>
+    async ({ versionId, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(
             `/v1/appStoreVersions/${versionId}/appStoreVersionLocalizations`,
@@ -304,11 +307,11 @@ export const registerVersionTools = (
       title: "App Store Connect: Get Version Localization",
       description:
         "Get one locale's full App Store metadata (description, keywords, what's-new, …).",
-      inputSchema: z.object({ localizationId: localizationIdArg }),
+      inputSchema: z.object({ localizationId: localizationIdArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
-    async ({ localizationId }) =>
-      wrap(async () =>
+    async ({ localizationId, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(await client.get(`/v1/appStoreVersionLocalizations/${localizationId}`)),
       ),
   );

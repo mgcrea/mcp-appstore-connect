@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
 import { summarizeResponse } from "#/client/shape";
-import { appIdArg, compact, fieldsArg, limitArg, wrap } from "#/tools/util";
+import { appIdArg, compact, fieldsArg, limitArg, savePathArg, wrap, wrapSaved } from "#/tools/util";
 
 export const registerAppTools = (
   server: McpServer,
@@ -26,11 +26,12 @@ export const registerAppTools = (
         sku: z.string().optional().describe("Filter by SKU."),
         limit: limitArg,
         fields: fieldsArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ bundleId, name, sku, limit, fields }) =>
-      wrap(async () =>
+    async ({ bundleId, name, sku, limit, fields, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(
             "/v1/apps",
@@ -51,11 +52,11 @@ export const registerAppTools = (
     {
       title: "App Store Connect: Get App",
       description: "Get one app's full attributes by its App Store Connect id.",
-      inputSchema: z.object({ appId: appIdArg, fields: fieldsArg }),
+      inputSchema: z.object({ appId: appIdArg, fields: fieldsArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appId, fields }) =>
-      wrap(async () =>
+    async ({ appId, fields, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(`/v1/apps/${appId}`, compact({ "fields[apps]": fields })),
         ),

@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
 import { includedOf, resourcesOf, summarizeResponse } from "#/client/shape";
-import { PLATFORMS, compact, limitArg, wrap } from "#/tools/util";
+import { compact, limitArg, PLATFORMS, savePathArg, wrap, wrapSaved } from "#/tools/util";
 
 // A category is not metadata you can leave for later: an app with no
 // primaryCategory is refused at submission with
@@ -74,11 +74,12 @@ export const registerCategoryTools = (
           .optional()
           .describe("Only categories available on this platform."),
         limit: limitArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ platform, limit }) =>
-      wrap(async () => {
+    async ({ platform, limit, savePath }) =>
+      wrapSaved(savePath, async () => {
         // `exists[parent]=false` keeps the top level only; without it the
         // subcategories come back as siblings of their own parents and the list
         // reads as a flat jumble of 60-odd entries.

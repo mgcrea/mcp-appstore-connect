@@ -3,7 +3,16 @@ import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
 import { attributesOf, isRecord, resourceOf, summarizeResponse } from "#/client/shape";
-import { compact, confirmArg, limitArg, type SavedFile, saveToPath, wrap } from "#/tools/util";
+import {
+  compact,
+  confirmArg,
+  limitArg,
+  type SavedFile,
+  savePathArg,
+  saveToPath,
+  wrap,
+  wrapSaved,
+} from "#/tools/util";
 
 /**
  * Apple's `CertificateType` is a moving target — DEVELOPER_ID_APPLICATION_G2 and
@@ -23,7 +32,7 @@ const certificateTypeArg = z
       "IOS_DISTRIBUTION, PASS_TYPE_ID.",
   );
 
-const savePathArg = z
+const certSavePathArg = z
   .string()
   .optional()
   .describe(
@@ -88,11 +97,12 @@ export const registerCertificateTools = (
         certificateType: certificateTypeArg.optional(),
         displayName: z.string().optional().describe("Filter by display name (exact match)."),
         limit: limitArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ certificateType, displayName, limit }) =>
-      wrap(async () =>
+    async ({ certificateType, displayName, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         withoutBlobs(
           summarizeResponse(
             await client.get(
@@ -166,7 +176,7 @@ export const registerCertificateTools = (
           .describe(
             "The full PEM text of the .csr, including the BEGIN/END CERTIFICATE REQUEST lines.",
           ),
-        savePath: savePathArg,
+        savePath: certSavePathArg,
       }),
       annotations: { readOnlyHint: false, destructiveHint: false },
     },

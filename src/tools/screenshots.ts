@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { AppStoreConnectClient, UploadOperation } from "#/client/asc";
 import { summarizeResponse } from "#/client/shape";
 import { attributesOf, idOf, isRecord, pollAssetState, readImage } from "#/tools/assets";
-import { compact, confirmArg, limitArg, wrap } from "#/tools/util";
+import { compact, confirmArg, limitArg, savePathArg, wrap, wrapSaved } from "#/tools/util";
 
 /**
  * Apple's ScreenshotDisplayType enum (spec 3.2). Hardcoded rather than accepted
@@ -226,11 +226,15 @@ export const registerScreenshotTools = (
       description:
         "List the screenshot sets of one App Store version localization — one set per device " +
         "type (screenshotDisplayType). Returns the set ids you upload into or reorder.",
-      inputSchema: z.object({ localizationId: localizationIdArg, limit: limitArg }),
+      inputSchema: z.object({
+        localizationId: localizationIdArg,
+        limit: limitArg,
+        savePath: savePathArg,
+      }),
       annotations: { readOnlyHint: true },
     },
-    async ({ localizationId, limit }) =>
-      wrap(async () =>
+    async ({ localizationId, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(
             `/v1/appStoreVersionLocalizations/${localizationId}/appScreenshotSets`,
@@ -247,11 +251,15 @@ export const registerScreenshotTools = (
       description:
         "List the screenshots in one set, in display order, with each file name, upload state " +
         "and image dimensions. Use it to audit what a device type currently shows on the store.",
-      inputSchema: z.object({ screenshotSetId: screenshotSetIdArg, limit: limitArg }),
+      inputSchema: z.object({
+        screenshotSetId: screenshotSetIdArg,
+        limit: limitArg,
+        savePath: savePathArg,
+      }),
       annotations: { readOnlyHint: true },
     },
-    async ({ screenshotSetId, limit }) =>
-      wrap(async () =>
+    async ({ screenshotSetId, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         stripUploadOperations(
           summarizeResponse(
             await client.get(
@@ -270,11 +278,11 @@ export const registerScreenshotTools = (
       description:
         "Get one screenshot, including its assetDeliveryState — the way to check whether App " +
         "Store Connect finished processing an upload that was still in progress.",
-      inputSchema: z.object({ screenshotId: screenshotIdArg }),
+      inputSchema: z.object({ screenshotId: screenshotIdArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
-    async ({ screenshotId }) =>
-      wrap(async () =>
+    async ({ screenshotId, savePath }) =>
+      wrapSaved(savePath, async () =>
         stripUploadOperations(
           summarizeResponse(await client.get(`/v1/appScreenshots/${screenshotId}`)),
         ),

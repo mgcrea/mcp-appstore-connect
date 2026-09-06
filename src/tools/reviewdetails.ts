@@ -5,7 +5,7 @@ import type { AppStoreConnectClient } from "#/client/asc";
 import { attributesOf, resourceOf, summarizeResponse } from "#/client/shape";
 import type { Contact } from "#/config";
 import type { ToolContext } from "#/tools/index";
-import { compact, getOrNull, versionIdArg, wrap } from "#/tools/util";
+import { compact, getOrNull, savePathArg, versionIdArg, wrap, wrapSaved } from "#/tools/util";
 
 // App Review Information: who Apple contacts, and how they get into the app.
 // The resource does not exist until someone creates it, and a version without
@@ -124,11 +124,11 @@ export const registerReviewDetailTools = (
         "Get the App Review Information attached to a version: the contact Apple reaches, the " +
         "demo account, and the reviewer notes. A null result means none exists, which blocks " +
         "submission — this is the check for the 'appStoreReviewDetail … was not found' error.",
-      inputSchema: z.object({ versionId: versionIdArg }),
+      inputSchema: z.object({ versionId: versionIdArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
-    async ({ versionId }) =>
-      wrap(async () => {
+    async ({ versionId, savePath }) =>
+      wrapSaved(savePath, async () => {
         const response = await getOrNull(
           client,
           `/v1/appStoreVersions/${versionId}/appStoreReviewDetail`,

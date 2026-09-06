@@ -214,6 +214,172 @@ describe("tool registration", () => {
       false,
     );
   });
+
+  /**
+   * The enforcement mechanism for "every read can save".
+   *
+   * The bug this feature fixes is an agent not reaching for `savePath` and
+   * retyping values instead, so the promise has to be one an agent can rely on
+   * without checking: all reads, no exceptions to remember. A curated list would
+   * rot silently — nothing fails when a new read tool is added without it — so
+   * the rule is asserted here, and each exception carries its reason.
+   */
+  it("offers savePath on every read tool", async () => {
+    const EXCLUDED = new Map([
+      // Registered before the config check, on a server that may have no
+      // credentials at all. Five diagnostic fields; nothing to save.
+      ["app_store_connect_auth_status", "diagnostic"],
+      // Already has one, writing the raw TSV/CSV rather than the JSON envelope —
+      // which is what report_stats.py and every spreadsheet want.
+      ["app_store_connect_download_sales_report", "saves the raw report"],
+      ["app_store_connect_download_finance_report", "saves the raw report"],
+      ["app_store_connect_download_analytics_report_segment", "saves the raw report"],
+      // savePath is required here and writes DER bytes; it is the save tool.
+      ["app_store_connect_download_certificate", "saves the raw certificate"],
+      // Returns {path, content} pairs precisely so the agent writes the metadata
+      // tree under its own permission prompt. See the listing round-trip docs.
+      ["app_store_connect_export_listing", "hands files back to be written"],
+    ]);
+
+    const client = await connect({ ...baseConfig, allowWrites: true });
+    const reads = (await client.listTools()).tools.filter((t) => t.annotations?.readOnlyHint);
+    expect(reads.length).toBeGreaterThan(40);
+
+    for (const tool of reads) {
+      const properties = (tool.inputSchema as { properties?: Record<string, unknown> }).properties;
+      if (EXCLUDED.has(tool.name)) continue;
+      expect(properties, tool.name).toHaveProperty("savePath");
+    }
+    // The exclusions are real tools, so a rename cannot quietly widen the list.
+    const names = new Set(reads.map((t) => t.name));
+    for (const name of EXCLUDED.keys()) expect(names, name).toContain(name);
+  });
+});
+
+/**
+ * The report downloads have saved to a path since they shipped, because a
+ * retyped report loses rows while still looking well-formed. Every other read
+ * had the same exposure and no answer for it: eight apps' minOsVersion floors
+ * went through an agent into a cache by hand, and were stale by the time anyone
+ * read them. These assertions are about the file being the source of truth
+ * rather than a copy of the response.
+ */
+describe("savePath on JSON reads", () => {
+  let dir = "";
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "asc-reads-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const buildsBody = {
+    data: [
+      {
+        type: "builds",
+        id: "b-1",
+        attributes: { version: "155", minOsVersion: "16.0", processingState: "VALID" },
+      },
+    ],
+  };
+
+  it("writes the payload it returned, minus the receipt", async () => {
+    const savePath = join(dir, "nested", "builds.json");
+    const fetchImpl = vi.fn(async () => jsonResponse(buildsBody));
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_builds",
+        arguments: { appId: "123", savePath },
+      }),
+    ) as Record<string, unknown> & { saved: { path: string; bytes: number; content: string } };
+
+    // Parent directories are created rather than being the caller's problem.
+    const text = await readFile(savePath, "utf8");
+    const { saved, ...payload } = body;
+    // The file is what the tool would have returned without savePath — the
+    // receipt is never written into the file it describes.
+    expect(JSON.parse(text)).toEqual(payload);
+    expect(saved).toEqual({
+      path: savePath,
+      bytes: Buffer.byteLength(text, "utf8"),
+      content: "json",
+    });
+    // Pretty on disk, compact on the wire: this copy is one someone opens.
+    expect(text).toContain("\n  ");
+  });
+
+  it("saves a hand-built payload too, not just a summarized list", async () => {
+    const savePath = join(dir, "version.json");
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        data: {
+          type: "appStoreVersions",
+          id: "v-1",
+          attributes: { versionString: "1.4.0", appStoreState: "READY_FOR_SALE" },
+          relationships: { build: { data: { type: "builds", id: "b-9" } } },
+        },
+        included: [{ type: "builds", id: "b-9", attributes: { minOsVersion: "26.0" } }],
+      }),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    await client.callTool({
+      name: "app_store_connect_get_version",
+      arguments: { versionId: "v-1", savePath },
+    });
+
+    // The whole point of the feature: the OS floor reaches the file without an
+    // agent retyping it.
+    const saved = JSON.parse(await readFile(savePath, "utf8")) as {
+      build: { minOsVersion: string };
+    };
+    expect(saved.build.minOsVersion).toBe("26.0");
+  });
+
+  it("refuses a relative path rather than writing somewhere unexpected", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(buildsBody));
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_list_builds",
+      arguments: { appId: "123", savePath: "builds.json" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("absolute path");
+  });
+
+  /**
+   * A failed write is a tool error, not a warning beside the data. Returning the
+   * payload with a note would invite exactly the outcome the feature exists to
+   * prevent — the agent shrugs and transcribes the inline copy.
+   */
+  it("fails the call when the write fails, naming the Docker case", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(buildsBody));
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_list_builds",
+      arguments: { appId: "123", savePath: dir },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Docker");
+  });
+
+  it("returns the payload unchanged when no savePath is given", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(buildsBody));
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_builds",
+        arguments: { appId: "123" },
+      }),
+    ) as Record<string, unknown>;
+
+    expect(body).not.toHaveProperty("saved");
+  });
 });
 
 describe("read tool calls", () => {

@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
 import { summarizeResponse } from "#/client/shape";
-import { appIdArg, compact, limitArg, wrap } from "#/tools/util";
+import { appIdArg, compact, limitArg, savePathArg, wrap, wrapSaved } from "#/tools/util";
 
 // An app's listing is split across two resources, and which one holds a field is
 // not guessable: appStoreVersionLocalizations carry the per-version copy
@@ -60,11 +60,11 @@ export const registerAppInfoTools = (
         "List an app's appInfo records, which hold the version-independent listing: name, " +
         "subtitle, privacy policy, categories and age rating. An app usually has two — the live " +
         "one (READY_FOR_SALE) and the editable one — so check `appStoreState` before updating.",
-      inputSchema: z.object({ appId: appIdArg, limit: limitArg }),
+      inputSchema: z.object({ appId: appIdArg, limit: limitArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appId, limit }) =>
-      wrap(async () =>
+    async ({ appId, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(
             `/v1/apps/${appId}/appInfos`,
@@ -81,11 +81,11 @@ export const registerAppInfoTools = (
       description:
         "List the per-locale name, subtitle and privacy policy for one appInfo. Returns the " +
         "localization ids you update.",
-      inputSchema: z.object({ appInfoId: appInfoIdArg, limit: limitArg }),
+      inputSchema: z.object({ appInfoId: appInfoIdArg, limit: limitArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appInfoId, limit }) =>
-      wrap(async () =>
+    async ({ appInfoId, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(
           await client.get(`/v1/appInfos/${appInfoId}/appInfoLocalizations`, compact({ limit })),
         ),
@@ -97,11 +97,11 @@ export const registerAppInfoTools = (
     {
       title: "App Store Connect: Get App Info Localization",
       description: "Get one locale's name, subtitle and privacy policy fields.",
-      inputSchema: z.object({ localizationId: appInfoLocalizationIdArg }),
+      inputSchema: z.object({ localizationId: appInfoLocalizationIdArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
-    async ({ localizationId }) =>
-      wrap(async () =>
+    async ({ localizationId, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(await client.get(`/v1/appInfoLocalizations/${localizationId}`)),
       ),
   );
@@ -115,11 +115,11 @@ export const registerAppInfoTools = (
         "rating, including `socialMedia`, `userGeneratedContent` and `messagingAndChat`. Returns " +
         "the declaration id that app_store_connect_update_age_rating_declaration takes. Note the " +
         "declaration is version-independent: there is one per appInfo, not one per release.",
-      inputSchema: z.object({ appInfoId: appInfoIdArg }),
+      inputSchema: z.object({ appInfoId: appInfoIdArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appInfoId }) =>
-      wrap(async () =>
+    async ({ appInfoId, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeResponse(await client.get(`/v1/appInfos/${appInfoId}/ageRatingDeclaration`)),
       ),
   );

@@ -12,15 +12,17 @@ import {
   summarizeResponse,
 } from "#/client/shape";
 import {
-  PLATFORMS,
-  PreconditionError,
   appIdArg,
   compact,
   confirmArg,
   dryRunArg,
   limitArg,
+  PLATFORMS,
+  PreconditionError,
+  savePathArg,
   versionIdArg,
   wrap,
+  wrapSaved,
 } from "#/tools/util";
 
 const SUBMISSION_STATES = [
@@ -259,11 +261,12 @@ export const registerSubmissionTools = (
         platform: z.enum(PLATFORMS).optional().describe("Filter by platform."),
         state: z.enum(SUBMISSION_STATES).optional().describe("Filter by submission state."),
         limit: limitArg,
+        savePath: savePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appId, platform, state, limit }) =>
-      wrap(async () =>
+    async ({ appId, platform, state, limit, savePath }) =>
+      wrapSaved(savePath, async () =>
         summarizeSubmissions(
           await client.get(
             `/v1/apps/${appId}/reviewSubmissions`,
