@@ -4128,3 +4128,86 @@ describe("get_app includeLiveVersion", () => {
     expect(body.live[0]?.build.minOsVersion).toBe("26.0");
   });
 });
+
+/**
+ * Only the three endpoints Apple's spec types `filter[app]` as an array — one
+ * real request, no fan-out hidden behind a name that promises one call.
+ */
+describe("multi-app reads", () => {
+  const buildRow = (id: string, appId: string): unknown => ({
+    type: "builds",
+    id,
+    attributes: { version: id },
+    relationships: { app: { data: { type: "apps", id: appId } } },
+  });
+
+  it("reads several apps' builds in one request, keyed by app", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ data: [buildRow("155", "1"), buildRow("42", "2")] }),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_builds",
+        arguments: { appId: ["1", "2"] },
+      }),
+    ) as { data: { id: string; appId: string }[] };
+
+    expect(fetchImpl.mock.calls).toHaveLength(1);
+    expect(new URL(callArgs(fetchImpl, 0)[0]).searchParams.get("filter[app]")).toBe("1,2");
+    // Without this the rows arrive interleaved with nothing to tell them apart.
+    expect(body.data.map((b) => b.appId)).toEqual(["1", "2"]);
+  });
+
+  it("still takes a single id, and still says which app each row is", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ data: [buildRow("155", "1")] }));
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_builds",
+        arguments: { appId: "1" },
+      }),
+    ) as { data: { appId: string }[]; note?: string };
+
+    expect(new URL(callArgs(fetchImpl, 0)[0]).searchParams.get("filter[app]")).toBe("1");
+    expect(body.data[0]?.appId).toBe("1");
+    expect(body.note).toBeUndefined();
+  });
+
+  /**
+   * The wrinkle that makes one HTTP call not a per-app answer: Apple's limit is
+   * one cap across the union, and its sort cannot interleave, so a full page can
+   * be entirely one app. Reading a missing app as "no builds" is the bug.
+   */
+  it("warns when a full page may have crowded an app out", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ data: [buildRow("1", "1"), buildRow("2", "1")] }),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_builds",
+        arguments: { appId: ["1", "2"], limit: 2 },
+      }),
+    ) as { note: string };
+
+    expect(body.note).toContain("across all 2 apps");
+  });
+
+  it("does not warn when the page is not full", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ data: [buildRow("1", "1")] }));
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_builds",
+        arguments: { appId: ["1", "2"], limit: 50 },
+      }),
+    ) as { note?: string };
+
+    expect(body.note).toBeUndefined();
+  });
+});

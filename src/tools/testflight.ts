@@ -5,11 +5,13 @@ import type { AppStoreConnectClient } from "#/client/asc";
 import { summarizeResponse } from "#/client/shape";
 import {
   appIdArg,
+  appIdsArg,
   compact,
   confirmArg,
   limitArg,
   PreconditionError,
   savePathArg,
+  summarizeWithApp,
   wrap,
   wrapSaved,
 } from "#/tools/util";
@@ -36,13 +38,15 @@ export const registerTestflightTools = (
       description:
         "List an app's TestFlight beta groups (internal and external), with their public-link " +
         "state. Returns the group ids used to manage testers.",
-      inputSchema: z.object({ appId: appIdArg, limit: limitArg, savePath: savePathArg }),
+      inputSchema: z.object({ appId: appIdsArg, limit: limitArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
     async ({ appId, limit, savePath }) =>
       wrapSaved(savePath, async () =>
-        summarizeResponse(
+        summarizeWithApp(
           await client.get("/v1/betaGroups", compact({ "filter[app]": appId, limit })),
+          limit,
+          appId,
         ),
       ),
   );

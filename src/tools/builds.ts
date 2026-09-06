@@ -2,8 +2,14 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
-import { summarizeResponse } from "#/client/shape";
-import { appIdArg, compact, limitArg, savePathArg, wrapSaved } from "#/tools/util";
+import {
+  appIdsArg,
+  compact,
+  limitArg,
+  savePathArg,
+  summarizeWithApp,
+  wrapSaved,
+} from "#/tools/util";
 
 export const registerBuildTools = (
   server: McpServer,
@@ -23,9 +29,11 @@ export const registerBuildTools = (
         "(minOsVersion, deployment target) gives an answer that is wrong in the direction that " +
         "looks right. The binary customers actually have is the one ATTACHED to the " +
         "READY_FOR_SALE version, often several builds older: resolve it with " +
-        "app_store_connect_get_version.",
+        "app_store_connect_get_version. `appId` also accepts an ARRAY of ids, read in a single " +
+        "request — but Apple applies `limit` across all of them at once, so a full page may be " +
+        "one chatty app's builds and none of another's; the response says so when that can bite.",
       inputSchema: z.object({
-        appId: appIdArg,
+        appId: appIdsArg,
         version: z
           .string()
           .optional()
@@ -41,7 +49,7 @@ export const registerBuildTools = (
     },
     async ({ appId, version, processingState, limit, savePath }) =>
       wrapSaved(savePath, async () =>
-        summarizeResponse(
+        summarizeWithApp(
           await client.get(
             "/v1/builds",
             compact({
@@ -51,6 +59,8 @@ export const registerBuildTools = (
               limit,
             }),
           ),
+          limit,
+          appId,
         ),
       ),
   );

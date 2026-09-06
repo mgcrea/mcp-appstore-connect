@@ -12,7 +12,7 @@ import {
   summarizeResponse,
 } from "#/client/shape";
 import {
-  appIdArg,
+  appIdsArg,
   compact,
   confirmArg,
   dryRunArg,
@@ -94,6 +94,9 @@ const summarizeSubmissions = (response: unknown): unknown => ({
     id: res.id,
     type: res.type,
     ...attributesOf(res),
+    // Also the app, so several apps' submissions can be read in one request and
+    // still be told apart.
+    appId: relatedId(res, "app"),
     appStoreVersionForReview: relatedId(res, "appStoreVersionForReview"),
   })),
 });
@@ -257,7 +260,7 @@ export const registerSubmissionTools = (
         "not yet sent to Apple; WAITING_FOR_REVIEW and IN_REVIEW are with Apple). Each row " +
         "carries the id of the version under review.",
       inputSchema: z.object({
-        appId: appIdArg,
+        appId: appIdsArg,
         platform: z.enum(PLATFORMS).optional().describe("Filter by platform."),
         state: z.enum(SUBMISSION_STATES).optional().describe("Filter by submission state."),
         limit: limitArg,

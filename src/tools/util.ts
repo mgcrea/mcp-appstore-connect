@@ -5,7 +5,13 @@ import { z } from "zod";
 
 import type { AppStoreConnectClient, Query } from "#/client/asc";
 import { AppStoreConnectApiError, WritesDisabledError } from "#/client/errors";
-import { isRecord } from "#/client/shape";
+import {
+  isRecord,
+  relatedId,
+  resourcesOf,
+  summarizeResource,
+  summarizeResponse,
+} from "#/client/shape";
 
 export type ToolResult = {
   content: { type: "text"; text: string }[];
@@ -212,6 +218,62 @@ export const appIdArg = z
   .describe(
     "The app's App Store Connect id (the `id` from app_store_connect_list_apps), NOT its bundle id.",
   );
+
+/**
+ * One app id, or several.
+ *
+ * Only offered on the collection endpoints Apple can genuinely serve in a single
+ * request — `/v1/builds`, `/v1/betaGroups`, `/v1/reviewSubmissions`, whose
+ * `filter[app]` its spec types as an array. Everything else app-scoped is a
+ * `/v1/apps/{id}/…` path with no top-level collection, where accepting a list
+ * would hide a fan-out behind a name that promises one call.
+ */
+export const appIdsArg = z
+  .union([z.string().min(1), z.array(z.string().min(1)).min(1)])
+  .describe(
+    "One app's App Store Connect id (the `id` from app_store_connect_list_apps, NOT its bundle " +
+      "id), or an array of them to read several apps in a single request. Each returned row " +
+      "carries the `appId` it belongs to.",
+  );
+
+/**
+ * Flatten a collection response, adding the `appId` each row belongs to.
+ *
+ * `summarizeResponse` drops `relationships`, which is where the owning app is —
+ * fine for a single-app read, and unusable across several, since the rows arrive
+ * interleaved with nothing to tell them apart.
+ *
+ * The saturation note matters more than it looks. Apple's `limit` on these
+ * endpoints is one global cap across the union of apps, and their `sort` offers
+ * no way to interleave fairly, so a full page can be entirely one chatty app
+ * while another contributes nothing — and a caller reading that as "this app has
+ * no builds" is wrong in a way the payload does not otherwise show.
+ */
+export const summarizeWithApp = (
+  response: unknown,
+  limit: number,
+  appIds: string | string[],
+): Record<string, unknown> => {
+  const rows = resourcesOf(response).map((res) => ({
+    ...(summarizeResource(res) as Record<string, unknown>),
+    appId: relatedId(res, "app"),
+  }));
+  const summarized = summarizeResponse(response) as Record<string, unknown>;
+  const many = Array.isArray(appIds) && appIds.length > 1;
+  return {
+    ...summarized,
+    data: rows,
+    ...(many && rows.length >= limit
+      ? {
+          note:
+            `This page is full (${rows.length} of a limit of ${limit}), and Apple applies that ` +
+            `limit across all ${appIds.length} apps at once rather than per app — so an app with ` +
+            `no rows here may simply have been crowded out. Raise limit, or ask per app, before ` +
+            `concluding anything about an app that is missing.`,
+        }
+      : {}),
+  };
+};
 
 export const versionIdArg = z
   .string()
