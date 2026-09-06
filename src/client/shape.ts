@@ -38,6 +38,22 @@ export const includedOf = (response: unknown, type: string): Rec[] => {
   return response.included.filter((item): item is Rec => isRecord(item) && item.type === type);
 };
 
+/**
+ * Sideloaded resources of a type, keyed by id, so each parent can be matched to
+ * its own.
+ *
+ * `firstIncluded` is right for a single-resource response and quietly wrong for
+ * a collection: ten versions with ten sideloaded builds would every one of them
+ * be handed `included[0]`, and the result reads as ten apps sharing a binary
+ * rather than as a bug.
+ */
+export const includedIndex = (response: unknown, type: string): Map<string, Rec> =>
+  new Map(
+    includedOf(response, type)
+      .filter((res) => typeof res.id === "string")
+      .map((res) => [res.id as string, res] as const),
+  );
+
 export type Resource = {
   type?: unknown;
   id?: unknown;

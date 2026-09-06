@@ -13,6 +13,7 @@ import { registerCustomerReviewTools } from "#/tools/customerreviews";
 import { registerDeviceTools } from "#/tools/devices";
 import { registerIapTools } from "#/tools/iap";
 import { registerListingTools } from "#/tools/listing";
+import { registerPortfolioTools } from "#/tools/portfolio";
 import { registerPricingTools } from "#/tools/pricing";
 import { registerReportTools } from "#/tools/reports";
 import { registerReviewDetailTools } from "#/tools/reviewdetails";
@@ -63,6 +64,10 @@ export const registerTools = (
 
   registerAppTools(server, client, allowWrites);
   registerVersionTools(server, client, allowWrites);
+  // Registered next to the version tools, because the question it answers —
+  // which binary each app ships today — is the one people reach for
+  // list_versions and list_builds to answer, and get wrong.
+  registerPortfolioTools(server, client, allowWrites);
   registerSubmissionTools(server, client, allowWrites);
   registerAppInfoTools(server, client, allowWrites);
   // Gates a first submission trips over, none of them version-scoped: category,

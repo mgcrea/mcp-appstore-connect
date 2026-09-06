@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
 import { summarizeResponse } from "#/client/shape";
+import { liveVersionsOf } from "#/tools/portfolio";
 import { appIdArg, compact, fieldsArg, limitArg, savePathArg, wrap, wrapSaved } from "#/tools/util";
 
 export const registerAppTools = (
@@ -16,7 +17,9 @@ export const registerAppTools = (
       title: "App Store Connect: List Apps",
       description:
         "List the apps on your App Store Connect account. Filter by bundle id, name, or SKU. " +
-        "Returns each app's id (used by the version/build/testflight tools), name and bundleId.",
+        "Returns each app's id (used by the version/build/testflight tools), name and bundleId. " +
+        "It does NOT say which version or binary each app currently ships — Apple cannot sideload " +
+        "a build onto this response at all. Use app_store_connect_list_live_versions for that.",
       inputSchema: z.object({
         bundleId: z
           .string()
@@ -51,16 +54,36 @@ export const registerAppTools = (
     "app_store_connect_get_app",
     {
       title: "App Store Connect: Get App",
-      description: "Get one app's full attributes by its App Store Connect id.",
-      inputSchema: z.object({ appId: appIdArg, fields: fieldsArg, savePath: savePathArg }),
+      description:
+        "Get one app's full attributes by its App Store Connect id. Pass includeLiveVersion to " +
+        "also resolve the version customers can download right now and the binary it ships " +
+        "(minOsVersion, build number, uploadedDate) — the app record alone says nothing about " +
+        "either. For every app at once, use app_store_connect_list_live_versions.",
+      inputSchema: z.object({
+        appId: appIdArg,
+        includeLiveVersion: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Also return `live`: the READY_FOR_SALE version(s) and the build attached to each. " +
+              "Costs one extra request. Universal apps ship IOS and MAC_OS separately, so it is " +
+              "an array; `[]` means nothing is live.",
+          ),
+        fields: fieldsArg,
+        savePath: savePathArg,
+      }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appId, fields, savePath }) =>
-      wrapSaved(savePath, async () =>
-        summarizeResponse(
+    async ({ appId, includeLiveVersion, fields, savePath }) =>
+      wrapSaved(savePath, async () => {
+        const app = summarizeResponse(
           await client.get(`/v1/apps/${appId}`, compact({ "fields[apps]": fields })),
-        ),
-      ),
+        );
+        if (!includeLiveVersion) return app;
+        // Through the rollup's own helper, so a single app and the portfolio
+        // cannot disagree about what "the live build" means.
+        return { ...(app as Record<string, unknown>), live: await liveVersionsOf(client, appId) };
+      }),
   );
 
   if (!allowWrites) return;

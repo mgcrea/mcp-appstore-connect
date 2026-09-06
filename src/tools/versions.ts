@@ -21,6 +21,7 @@ import {
   wrap,
   wrapSaved,
 } from "#/tools/util";
+import { versionOfResponse } from "#/tools/versionshape";
 
 const localizationIdArg = z
   .string()
@@ -256,28 +257,14 @@ export const registerVersionTools = (
       annotations: { readOnlyHint: true },
     },
     async ({ versionId, savePath }) =>
-      wrapSaved(savePath, async () => {
+      wrapSaved(savePath, async () =>
         // The build lives in `relationships` and `included`, both of which
-        // summarizeResponse drops — hence the hand-built shape.
-        const response = await client.get(`/v1/appStoreVersions/${versionId}`, {
-          include: "build",
-        });
-        const version = resourceOf(response);
-        const build = firstIncluded(response, "builds");
-        // Apple can return the relationship without sideloading the resource, so
-        // the id comes from the relationship and the detail from `included`.
-        const buildId = relatedId(version, "build");
-
-        return {
-          id: version.id,
-          ...attributesOf(version),
-          appId: relatedId(version, "app"),
-          build:
-            buildId === undefined
-              ? null
-              : { id: buildId, ...(build === undefined ? {} : attributesOf(build)) },
-        };
-      }),
+        // summarizeResponse drops — hence the hand-built shape, shared with the
+        // portfolio rollup so its three edge cases have one implementation.
+        versionOfResponse(
+          await client.get(`/v1/appStoreVersions/${versionId}`, { include: "build" }),
+        ),
+      ),
   );
 
   server.registerTool(

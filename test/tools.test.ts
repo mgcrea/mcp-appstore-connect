@@ -112,6 +112,7 @@ describe("tool registration", () => {
     for (const name of [
       "app_store_connect_list_apps",
       "app_store_connect_get_app",
+      "app_store_connect_list_live_versions",
       "app_store_connect_list_versions",
       "app_store_connect_get_version",
       "app_store_connect_list_review_submissions",
@@ -3795,5 +3796,335 @@ describe("certificates", () => {
     });
     expect(result.isError).toBe(true);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The rollup exists because answering "what OS does our listing require today?"
+ * across a portfolio was list_versions -> get_version per app, and the shortcut
+ * everyone reaches for instead — the newest VALID build in list_builds — is a
+ * proxy that is usually a TestFlight or in-review binary. Eight apps' floors
+ * were measured that way and were wrong.
+ */
+describe("list_live_versions", () => {
+  const app = (id: string, name: string): unknown => ({
+    type: "apps",
+    id,
+    attributes: { name, bundleId: `com.acme.${name.toLowerCase()}` },
+  });
+
+  const version = (
+    id: string,
+    versionString: string,
+    appStoreState: string,
+    buildId: string | null,
+    platform = "IOS",
+  ): unknown => ({
+    type: "appStoreVersions",
+    id,
+    attributes: { versionString, appStoreState, platform },
+    relationships: {
+      ...(buildId === null ? {} : { build: { data: { type: "builds", id: buildId } } }),
+    },
+  });
+
+  const build = (id: string, minOsVersion: string, buildVersion: string): unknown => ({
+    type: "builds",
+    id,
+    attributes: { minOsVersion, version: buildVersion, uploadedDate: "2026-08-03T13:46:17-07:00" },
+  });
+
+  /** Route by URL, since this tool makes several different calls per invocation. */
+  const routed = (routes: [RegExp, (url: string) => Response][]): ReturnType<typeof vi.fn> =>
+    vi.fn(async (url: string) => {
+      const hit = routes.find(([re]) => re.test(String(url)));
+      if (!hit) throw new Error(`unrouted: ${String(url)}`);
+      return hit[1](String(url));
+    });
+
+  // A factory, not a constant: a Response body can only be read once, so a
+  // shared instance passes the first test and fails every later one.
+  const threeApps = (): Response =>
+    jsonResponse({ data: [app("1", "Alpha"), app("2", "Beta"), app("3", "Gamma")] });
+
+  it("makes one request for the apps and one per app, no more", async () => {
+    const fetchImpl = routed([
+      [/\/v1\/apps\?/, () => threeApps()],
+      [
+        /\/appStoreVersions/,
+        () =>
+          jsonResponse({
+            data: [version("v1", "1.4.0", "READY_FOR_SALE", "b1")],
+            included: [build("b1", "16.0", "155")],
+          }),
+      ],
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({ name: "app_store_connect_list_live_versions", arguments: {} }),
+    ) as {
+      apps: { name: string; live: { build: { minOsVersion: string } }[] }[];
+      meta: Record<string, number>;
+    };
+
+    // The regression that keeps a rollup a rollup: 1 + N, never N * 3.
+    expect(fetchImpl.mock.calls).toHaveLength(4);
+    expect(body.meta.requests).toBe(4);
+    expect(body.apps.map((a) => a.name)).toEqual(["Alpha", "Beta", "Gamma"]);
+    expect(body.apps[0]?.live[0]?.build.minOsVersion).toBe("16.0");
+  });
+
+  it("asks Apple for the live state and the build, rather than filtering locally", async () => {
+    const fetchImpl = routed([
+      [/\/v1\/apps\?/, () => jsonResponse({ data: [app("1", "Alpha")] })],
+      [/\/appStoreVersions/, () => jsonResponse({ data: [] })],
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    await client.callTool({ name: "app_store_connect_list_live_versions", arguments: {} });
+
+    const url = new URL(callArgs(fetchImpl, 1)[0]);
+    expect(url.pathname).toBe("/v1/apps/1/appStoreVersions");
+    expect(url.searchParams.get("filter[appStoreState]")).toBe("READY_FOR_SALE");
+    expect(url.searchParams.get("include")).toBe("build");
+  });
+
+  /**
+   * The test that catches a naive port of `firstIncluded`: a collection
+   * sideloads many builds, and handing every version `included[0]` reads as a
+   * portfolio sharing one binary rather than as a bug.
+   */
+  it("gives each version its own sideloaded build", async () => {
+    const fetchImpl = routed([
+      [/\/v1\/apps\?/, () => jsonResponse({ data: [app("1", "Universal")] })],
+      [
+        /\/appStoreVersions/,
+        () =>
+          jsonResponse({
+            data: [
+              version("v1", "1.4.0", "READY_FOR_SALE", "b-ios", "IOS"),
+              version("v2", "1.4.0", "READY_FOR_SALE", "b-mac", "MAC_OS"),
+            ],
+            included: [build("b-ios", "16.0", "155"), build("b-mac", "26.0", "160")],
+          }),
+      ],
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({ name: "app_store_connect_list_live_versions", arguments: {} }),
+    ) as { apps: { live: { platform: string; build: { minOsVersion: string } }[] }[] };
+
+    const live = body.apps[0]?.live ?? [];
+    expect(live).toHaveLength(2);
+    expect(live.find((v) => v.platform === "IOS")?.build.minOsVersion).toBe("16.0");
+    expect(live.find((v) => v.platform === "MAC_OS")?.build.minOsVersion).toBe("26.0");
+  });
+
+  it("reports an app that failed instead of dropping it", async () => {
+    const fetchImpl = routed([
+      [/\/v1\/apps\?/, () => threeApps()],
+      [
+        /\/v1\/apps\/2\/appStoreVersions/,
+        () => new Response(JSON.stringify({ errors: [{ status: "403" }] }), { status: 403 }),
+      ],
+      [
+        /\/appStoreVersions/,
+        () =>
+          jsonResponse({
+            data: [version("v1", "1.4.0", "READY_FOR_SALE", "b1")],
+            included: [build("b1", "16.0", "155")],
+          }),
+      ],
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const result = await client.callTool({
+      name: "app_store_connect_list_live_versions",
+      arguments: {},
+    });
+    const body = payloadOf(result) as {
+      apps: unknown[];
+      errors: { appId: string; name: string; status: number }[];
+      meta: { failed: number };
+      note: string;
+    };
+
+    expect(result.isError).toBeFalsy();
+    expect(body.apps).toHaveLength(2);
+    expect(body.errors[0]).toMatchObject({ appId: "2", name: "Beta", status: 403 });
+    expect(body.meta.failed).toBe(1);
+    // Named, not merely counted: a model summarizing 2 rows must not report the
+    // portfolio as two apps.
+    expect(body.note).toContain("Beta");
+  });
+
+  it("fails the call when no app could be read at all", async () => {
+    const fetchImpl = routed([
+      [/\/v1\/apps\?/, () => jsonResponse({ data: [app("1", "Alpha")] })],
+      [/\/appStoreVersions/, () => new Response("{}", { status: 403 })],
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const result = await client.callTool({
+      name: "app_store_connect_list_live_versions",
+      arguments: {},
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("not an empty portfolio");
+  });
+
+  it("keeps a row for an app with nothing live", async () => {
+    const fetchImpl = routed([
+      [/\/v1\/apps\?/, () => jsonResponse({ data: [app("1", "Alpha")] })],
+      [/\/appStoreVersions/, () => jsonResponse({ data: [] })],
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({ name: "app_store_connect_list_live_versions", arguments: {} }),
+    ) as {
+      apps: { name: string; live: unknown[] }[];
+      meta: { noLiveVersion: number };
+      note: string;
+    };
+
+    expect(body.apps).toHaveLength(1);
+    expect(body.apps[0]?.live).toEqual([]);
+    expect(body.meta.noLiveVersion).toBe(1);
+    expect(body.note).toContain("never shipped");
+  });
+
+  /**
+   * A build attached but not sideloaded. `{id}` with no minOsVersion has to stay
+   * distinguishable from `null`, or a missing attribute reads as "no OS floor".
+   */
+  it("distinguishes an unsideloaded build from no build at all", async () => {
+    const fetchImpl = routed([
+      [/\/v1\/apps\?/, () => jsonResponse({ data: [app("1", "Alpha"), app("2", "Beta")] })],
+      [
+        /\/v1\/apps\/1\/appStoreVersions/,
+        () => jsonResponse({ data: [version("v1", "1.0", "READY_FOR_SALE", "b9")], included: [] }),
+      ],
+      [
+        /\/appStoreVersions/,
+        () => jsonResponse({ data: [version("v2", "1.0", "READY_FOR_SALE", null)] }),
+      ],
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({ name: "app_store_connect_list_live_versions", arguments: {} }),
+    ) as { apps: { name: string; live: { build: unknown }[] }[]; note: string };
+
+    const alpha = body.apps.find((a) => a.name === "Alpha");
+    const beta = body.apps.find((a) => a.name === "Beta");
+    expect(alpha?.live[0]?.build).toEqual({ id: "b9" });
+    expect(beta?.live[0]?.build).toBeNull();
+    expect(body.note).toContain("missing data, not an absent OS floor");
+  });
+
+  it("selects a subset without enumerating the account", async () => {
+    const fetchImpl = routed([
+      [/\/v1\/apps\?/, () => jsonResponse({ data: [app("a", "Alpha")] })],
+      [/\/appStoreVersions/, () => jsonResponse({ data: [] })],
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    await client.callTool({
+      name: "app_store_connect_list_live_versions",
+      arguments: { appIds: ["a", "b"], limit: 2 },
+    });
+
+    const url = new URL(callArgs(fetchImpl, 0)[0]);
+    // Comma-joined, the JSON:API spelling Apple expects.
+    expect(url.searchParams.get("filter[id]")).toBe("a,b");
+    expect(url.searchParams.get("limit")).toBe("2");
+  });
+
+  it("adds the pipeline states to the same request rather than a second one", async () => {
+    const fetchImpl = routed([
+      [/\/v1\/apps\?/, () => jsonResponse({ data: [app("1", "Alpha")] })],
+      [
+        /\/appStoreVersions/,
+        () =>
+          jsonResponse({
+            data: [
+              version("v1", "1.4.0", "READY_FOR_SALE", null),
+              version("v2", "1.5.0", "WAITING_FOR_REVIEW", null),
+            ],
+          }),
+      ],
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_live_versions",
+        arguments: { includeInFlight: true },
+      }),
+    ) as { apps: { live: { versionString: string }[]; inFlight: { versionString: string }[] }[] };
+
+    expect(fetchImpl.mock.calls).toHaveLength(2); // still 1 + N
+    const states = new URL(callArgs(fetchImpl, 1)[0]).searchParams.get("filter[appStoreState]");
+    expect(states?.startsWith("READY_FOR_SALE,")).toBe(true);
+    expect(body.apps[0]?.live.map((v) => v.versionString)).toEqual(["1.4.0"]);
+    expect(body.apps[0]?.inFlight.map((v) => v.versionString)).toEqual(["1.5.0"]);
+  });
+
+  /** The description of the tool that misleads must point at the one that does not. */
+  it("is named by list_builds' description", async () => {
+    const client = await connect(baseConfig);
+    const tools = (await client.listTools()).tools;
+    const builds = tools.find((t) => t.name === "app_store_connect_list_builds");
+
+    expect(builds?.description).toContain("app_store_connect_get_version");
+  });
+});
+
+describe("get_app includeLiveVersion", () => {
+  const appBody = {
+    data: { type: "apps", id: "1", attributes: { name: "Alpha", bundleId: "com.acme.alpha" } },
+  };
+
+  it("costs nothing extra when it is not asked for", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(appBody));
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({ name: "app_store_connect_get_app", arguments: { appId: "1" } }),
+    );
+
+    expect(fetchImpl.mock.calls).toHaveLength(1);
+    expect(body).not.toHaveProperty("live");
+  });
+
+  it("resolves the shipping binary in exactly one extra request", async () => {
+    const fetchImpl = vi.fn(async (url: string) =>
+      String(url).includes("appStoreVersions")
+        ? jsonResponse({
+            data: [
+              {
+                type: "appStoreVersions",
+                id: "v1",
+                attributes: { versionString: "1.4.0", appStoreState: "READY_FOR_SALE" },
+                relationships: { build: { data: { type: "builds", id: "b1" } } },
+              },
+            ],
+            included: [{ type: "builds", id: "b1", attributes: { minOsVersion: "26.0" } }],
+          })
+        : jsonResponse(appBody),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_get_app",
+        arguments: { appId: "1", includeLiveVersion: true },
+      }),
+    ) as { data: { name: string }; live: { build: { minOsVersion: string } }[] };
+
+    expect(fetchImpl.mock.calls).toHaveLength(2);
+    expect(body.live[0]?.build.minOsVersion).toBe("26.0");
   });
 });
