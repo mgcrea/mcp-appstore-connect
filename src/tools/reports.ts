@@ -1233,8 +1233,32 @@ export const registerReportTools = (
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ appId, category, includeFrameworkUsage, maxReportsProbed }) =>
+    async ({ appId, category, includeFrameworkUsage, maxReportsProbed }, req) =>
       wrap(async () => {
+        /**
+         * Report progress, when the caller asked for it.
+         *
+         * This walk is the slowest thing the server does — three sequential
+         * stages, and Apple registers ~106 reports against a default probe of
+         * 20, so the third stage is several round trips on its own. Without
+         * this the caller sees nothing at all until the whole chain finishes.
+         *
+         * Silent when no token was sent: progress is something the client opts
+         * into per call, and emitting frames nobody asked for is traffic that
+         * ends up dropped at the other end.
+         */
+        const progressToken = req.mcpReq._meta?.progressToken;
+        // Two fixed stages ahead of the probe loop, so `progress` stays on one
+        // scale and strictly increases the way the spec requires.
+        const notify = async (progress: number, total: number, message: string) => {
+          if (progressToken === undefined) return;
+          await req.mcpReq.notify({
+            method: "notifications/progress",
+            params: { progressToken, progress, total, message },
+          });
+        };
+
+        await notify(0, 2, "Reading analytics report requests");
         const requests = await client.getAll<Rec>(`/v1/apps/${appId}/analyticsReportRequests`, {
           limit: 200,
         });
@@ -1255,6 +1279,7 @@ export const registerReportTools = (
           };
         }
 
+        await notify(1, 2, `Listing reports for ${requests.data.length} requests`);
         const reportPages = await Promise.all(
           requests.data.map((request) =>
             client.getAll<Rec>(
@@ -1289,6 +1314,9 @@ export const registerReportTools = (
          */
         const probed: Rec[] = [];
         const instancePages: { data: Rec[] }[] = [];
+        // The two fixed stages above are already counted, so the loop's own
+        // total is offset by them rather than restarting at zero.
+        const total = 2 + reports.length;
         while (probed.length < reports.length) {
           const batch = reports.slice(probed.length, probed.length + maxReportsProbed);
           const pages = await Promise.all(
@@ -1298,6 +1326,11 @@ export const registerReportTools = (
           );
           probed.push(...batch);
           instancePages.push(...pages);
+          await notify(
+            2 + probed.length,
+            total,
+            `Probed ${probed.length} of ${reports.length} reports`,
+          );
           if (instancePages.some((page) => page.data.length > 0)) break;
         }
 
