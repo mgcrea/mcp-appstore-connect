@@ -2341,10 +2341,13 @@ describe("download_sales_report per-app filter", () => {
         unknown
       >;
 
-      expect(body.truncated).toBe(true);
+      expect(body.inlineTruncated).toBe(true);
       expect(await readFile(savePath, "utf8")).toBe(SALES_TSV);
-      expect(body.saved).toMatchObject({ dataRows: 3 });
+      expect(body.saved).toMatchObject({ dataRows: 3, content: "report" });
+      // The note is an instruction, not a correction: it says where the totals
+      // are and that report_stats.py goes there by itself.
       expect(String(body.savedNote)).toContain("all 3 data rows");
+      expect(String(body.savedNote)).toContain(savePath);
     });
 
     it("saves the filtered rows, not the whole portfolio", async () => {
@@ -2873,7 +2876,7 @@ describe("analytics reports", () => {
     const body = JSON.parse(textOf(result));
     expect(body.segment).toEqual({ index: 0, of: 1, checksum: "deadbeef", sizeInBytes: 512 });
     expect(body.report).toBe(CSV);
-    expect(body.truncated).toBe(false);
+    expect(body.inlineTruncated).toBe(false);
     expect(callArgs(fetchImpl as ReturnType<typeof vi.fn>, 1)[0]).toBe(SEGMENT_URL);
   });
 
@@ -2892,7 +2895,7 @@ describe("analytics reports", () => {
     );
 
     const body = JSON.parse(textOf(result));
-    expect(body.truncated).toBe(true);
+    expect(body.inlineTruncated).toBe(true);
     expect(body.report.split("\n")).toHaveLength(5);
   });
 
@@ -2900,7 +2903,7 @@ describe("analytics reports", () => {
    * Apple terminates every report with a newline, so splitting on it leaves a
    * phantom empty line. Counting that line used to flag a complete report as
    * truncated the moment its real content reached `maxLines` exactly. Nothing
-   * downstream shrugs that off: report_stats.py treats `truncated` as a hard
+   * downstream shrugs that off: report_stats.py treats truncation as a hard
    * error so a floor is never quoted as a total, so the false flag refused a
    * file that had lost nothing.
    */
@@ -2919,8 +2922,8 @@ describe("analytics reports", () => {
     );
 
     const body = JSON.parse(textOf(result));
-    expect(body.truncated).toBe(false);
-    expect(body.rows).toBe(3); // content lines, not the phantom blank
+    expect(body.inlineTruncated).toBe(false);
+    expect(body.lines).toBe(3); // content lines, not the phantom blank
     expect(body.dataRows).toBe(2); // the same count without the header
     expect(body.report).toBe(CSV);
   });

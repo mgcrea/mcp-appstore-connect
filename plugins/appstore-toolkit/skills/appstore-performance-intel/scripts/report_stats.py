@@ -72,6 +72,7 @@ import argparse
 import datetime
 import json
 import math
+import os
 import re
 import sys
 
@@ -139,16 +140,70 @@ class ReportError(Exception):
     """Something about the input makes the requested number unanswerable."""
 
 
+def read_saved(saved, dump_path):
+    """(text, source, why-not) for the complete file a tool result points at.
+
+    Never raises. A file we cannot verify is a file we do not use, and the
+    inline copy behind it is still subject to the truncation guard -- so the
+    worst case here is the behaviour we had before this existed.
+
+    The check is on BYTES, not row count. Comparing len(rows) to saved.dataRows
+    would false-alarm on every finance report: those are multi-section with
+    interior blank lines, which the row filter below drops and the tool's own
+    line counter keeps.
+    """
+    if not isinstance(saved, dict):
+        return None, None, ""
+    # Absent on files written before `content` existed, and "report" is the
+    # right default for those -- only the report downloads had savePath then.
+    kind = saved.get("content", "report")
+    if kind != "report":
+        return None, None, "the saved file is a %s dump, not a report" % kind
+    path = saved.get("path")
+    if not isinstance(path, str) or not path:
+        return None, None, "the result names no saved path"
+
+    expected = saved.get("bytes")
+    candidates = [path]
+    # Recovers two real cases: a reports directory copied to another machine,
+    # and a Docker container path that does not exist on the host. Both still
+    # have to pass the byte check, so a same-named different file is refused.
+    sibling = os.path.join(os.path.dirname(os.path.abspath(dump_path)), os.path.basename(path))
+    if sibling != path:
+        candidates.append(sibling)
+
+    tried = []
+    for candidate in candidates:
+        if not os.path.exists(candidate):
+            tried.append("%s (missing)" % candidate)
+            continue
+        size = os.path.getsize(candidate)
+        if isinstance(expected, int) and size != expected:
+            tried.append("%s (%d bytes, expected %d)" % (candidate, size, expected))
+            continue
+        with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read(), candidate, ""
+    return None, None, "; ".join(tried)
+
+
 def read_report(path):
-    """Return (rows, columns, truncated, note) from a tool dump or a raw file."""
+    """Return (rows, columns, truncated, note, source) from a dump or raw file.
+
+    Handed a tool result that saved the report to disk, this reads THAT file
+    rather than the copy inlined in the response. The inline copy is the one
+    maxLines trims, so without this an agent that saved the tool result got a
+    refusal on a report that had lost nothing -- the failure `savedNote` was
+    written to explain, one layer down.
+    """
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         raw = fh.read()
 
     truncated = False
     note = ""
+    source = path
     text = raw.strip()
 
-    # The tool result shape: {"rows": N, "truncated": bool, "report": "..."}.
+    # The tool result shape: {"lines": N, "inlineTruncated": bool, "report": ...}.
     # Also tolerate the segment-download shape, which nests the same keys
     # alongside a "segment" block.
     if text.startswith("{"):
@@ -166,9 +221,27 @@ def read_report(path):
                     "JSON input has no 'report' key. Save the whole tool result, "
                     "or save the raw TSV/CSV text."
                 )
-            truncated = bool(blob.get("truncated"))
-            note = str(blob.get("note") or "")
+            # `truncated` is the pre-0.23 spelling, kept by the server forever
+            # because its ABSENCE reads as false. Accept either.
+            truncated = bool(blob.get("inlineTruncated", blob.get("truncated")))
+            note = str(blob.get("inlineNote") or blob.get("note") or "")
             text = blob["report"]
+
+            saved_text, saved_path, why = read_saved(blob.get("saved"), path)
+            if saved_text is not None:
+                # The complete file. Nothing here is a floor any more.
+                text = saved_text
+                source = saved_path
+                truncated = False
+                note = ""
+                # Say which bytes are being summed. Same principle as every
+                # command echoing the filter it applied: a total whose source
+                # is ambiguous is a total nobody can check. stderr, so it never
+                # lands in output something else is parsing.
+                print("read: %s (complete copy named by %s)" % (source, path), file=sys.stderr)
+            elif truncated and why:
+                note = ("%s The result named a saved copy but it could not be used: %s." %
+                        (note, why)).strip()
 
     lines = [ln for ln in text.split("\n") if ln.strip()]
     if not lines:
@@ -185,7 +258,7 @@ def read_report(path):
             cells += [""] * (len(columns) - len(cells))
         rows.append({col: cells[i].strip() for i, col in enumerate(columns)})
 
-    return rows, columns, truncated, note
+    return rows, columns, truncated, note, source
 
 
 def to_number(value):
@@ -314,8 +387,9 @@ def guard_truncation(path, truncated, note, allowed):
     if not truncated:
         return
     message = (
-        "%s was TRUNCATED by the report tool, so every total below is a floor, "
-        "not a total.%s Re-fetch it with a higher maxLines, or switch to a "
+        "%s was TRUNCATED by the report tool and no complete copy was reachable, "
+        "so every total below is a floor, not a total.%s Re-fetch it with a higher "
+        "maxLines, pass savePath and point this at the .tsv itself, or switch to a "
         "SUMMARY subtype / narrower window." % (path, (" " + note) if note else "")
     )
     if not allowed:
@@ -366,7 +440,7 @@ def warn_duplicates(path, rows):
 
 def cmd_summary(args):
     for path in args.files:
-        rows, columns, truncated, note = read_report(path)
+        rows, columns, truncated, note, source = read_report(path)
         guard_truncation(path, truncated, note, args.allow_truncated)
         warn_duplicates(path, rows)
         rows, filter_lines = apply_filters(rows, args, columns)
@@ -518,7 +592,7 @@ def apply_filters(rows, args, columns):
 
 
 def cmd_group(args):
-    rows, columns, truncated, note = read_report(args.file)
+    rows, columns, truncated, note, source = read_report(args.file)
     guard_truncation(args.file, truncated, note, args.allow_truncated)
     warn_duplicates(args.file, rows)
     rows, filter_lines = apply_filters(rows, args, columns)
@@ -568,7 +642,7 @@ def cmd_money(args):
     anything is summed, and a total that spans currencies is meaningless no
     matter how it is computed.
     """
-    rows, columns, truncated, note = read_report(args.file)
+    rows, columns, truncated, note, source = read_report(args.file)
     guard_truncation(args.file, truncated, note, args.allow_truncated)
     warn_duplicates(args.file, rows)
     rows, money_filter_lines = apply_filters(rows, args, columns)
@@ -775,7 +849,7 @@ def cmd_rate(args):
     """
     periods = []
     for path in args.files:
-        rows, columns, truncated, note = read_report(path)
+        rows, columns, truncated, note, source = read_report(path)
         guard_truncation(path, truncated, note, args.allow_truncated)
         warn_duplicates(path, rows)
         rows, filter_lines = apply_filters(rows, args, columns)
@@ -955,7 +1029,7 @@ def cmd_ratio(args):
 
     periods = []
     for path in files:
-        rows, columns, truncated, note = read_report(path)
+        rows, columns, truncated, note, source = read_report(path)
         guard_truncation(path, truncated, note, args.allow_truncated)
         warn_duplicates(path, rows)
         rows, filter_lines = apply_filters(rows, args, columns)
@@ -1139,8 +1213,8 @@ def cmd_ratio(args):
 
 
 def cmd_compare(args):
-    base_rows, base_cols, base_trunc, base_note = read_report(args.base)
-    cur_rows, cur_cols, cur_trunc, cur_note = read_report(args.current)
+    base_rows, base_cols, base_trunc, base_note, base_src = read_report(args.base)
+    cur_rows, cur_cols, cur_trunc, cur_note, cur_src = read_report(args.current)
     guard_truncation(args.base, base_trunc, base_note, args.allow_truncated)
     guard_truncation(args.current, cur_trunc, cur_note, args.allow_truncated)
 

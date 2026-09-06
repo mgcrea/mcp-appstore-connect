@@ -21,15 +21,15 @@ describe("previewReport", () => {
     // three rows for a two-row file.
     const result = previewReport(`${header}\n${row(1)}\n`, 500);
 
-    expect(result.rows).toBe(2);
+    expect(result.lines).toBe(2);
     expect(result.dataRows).toBe(1);
-    expect(result.truncated).toBe(false);
+    expect(result.inlineTruncated).toBe(false);
   });
 
   it("does not count several trailing newlines either", () => {
     const result = previewReport(`${header}\n${row(1)}\n\n\n`, 500);
 
-    expect(result.rows).toBe(2);
+    expect(result.lines).toBe(2);
     expect(result.dataRows).toBe(1);
   });
 
@@ -39,19 +39,19 @@ describe("previewReport", () => {
     // nothing. `report_stats.py` would then refuse it outright.
     const result = previewReport(`${header}\n${row(1)}\n`, 2);
 
-    expect(result.truncated).toBe(false);
-    expect(result.note).toBeUndefined();
+    expect(result.inlineTruncated).toBe(false);
+    expect(result.inlineNote).toBeUndefined();
     expect(result.report).toBe(`${header}\n${row(1)}\n`);
   });
 
   it("truncates only once the content genuinely exceeds maxLines", () => {
     const result = previewReport(`${header}\n${row(1)}\n${row(2)}\n`, 2);
 
-    expect(result.truncated).toBe(true);
-    expect(result.rows).toBe(3);
+    expect(result.inlineTruncated).toBe(true);
+    expect(result.lines).toBe(3);
     expect(result.dataRows).toBe(2);
-    // The count in the note is the stripped one, so it agrees with `rows`.
-    expect(result.note).toBe("Showing first 2 of 3 lines.");
+    // The count in the note is the stripped one, so it agrees with `lines`.
+    expect(result.inlineNote).toBe("Inlining the first 2 of 3 lines.");
     expect(result.report).toBe(`${header}\n${row(1)}`);
   });
 
@@ -67,16 +67,16 @@ describe("previewReport", () => {
     // floor at 0 rather than go negative off the header subtraction.
     const result = previewReport(`${header}\n`, 500);
 
-    expect(result.rows).toBe(1);
+    expect(result.lines).toBe(1);
     expect(result.dataRows).toBe(0);
   });
 
   it("reports zero rows for an entirely empty body", () => {
     const result = previewReport("", 500);
 
-    expect(result.rows).toBe(0);
+    expect(result.lines).toBe(0);
     expect(result.dataRows).toBe(0);
-    expect(result.truncated).toBe(false);
+    expect(result.inlineTruncated).toBe(false);
   });
 
   it("says nothing about duplicates when there are none", () => {
@@ -120,7 +120,42 @@ describe("previewReport", () => {
     // `truncated` and saves the file still needs to know the file double-counts.
     const result = previewReport(`${header}\n${row(1)}\n${row(2)}\n${row(1)}\n`, 2);
 
-    expect(result.truncated).toBe(true);
+    expect(result.inlineTruncated).toBe(true);
     expect(result.duplicateRows).toBe(1);
+  });
+});
+
+/**
+ * `truncated` described the inlined copy while reading as though it described
+ * the report, and needed a companion `savedNote` to un-mislead anyone who took
+ * it at face value. `inlineTruncated` says what it means; `truncated` stays
+ * behind it.
+ */
+describe("previewReport deprecated aliases", () => {
+  const header = "Provider\tUnits";
+  const row = (n: number): string => `APPLE\t${n}`;
+
+  it("keeps `truncated` agreeing with `inlineTruncated` in both directions", () => {
+    const short = previewReport(`${header}\n${row(1)}\n`, 500);
+    expect(short.truncated).toBe(false);
+    expect(short.truncated).toBe(short.inlineTruncated);
+
+    const long = previewReport(`${header}\n${row(1)}\n${row(2)}\n`, 2);
+    expect(long.truncated).toBe(true);
+    expect(long.truncated).toBe(long.inlineTruncated);
+  });
+
+  /**
+   * The reason `truncated` is kept rather than deprecated. A reader that loses
+   * `rows` or `note` raises; a reader that loses `truncated` reads absence as
+   * false, stops refusing a partial report, and publishes a floor as a total.
+   * Silent, and in the one direction that costs money.
+   */
+  it("drops `rows` and `note`, which fail loudly, but never `truncated`", () => {
+    const result = previewReport(`${header}\n${row(1)}\n${row(2)}\n`, 2);
+
+    expect(result.rows).toBeUndefined();
+    expect(result.note).toBeUndefined();
+    expect(result).toHaveProperty("truncated");
   });
 });

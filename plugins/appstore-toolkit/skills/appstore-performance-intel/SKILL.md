@@ -163,21 +163,28 @@ app_store_connect_download_analytics_report_segment{ …, savePath: "<abs>/repor
 
 The file gets the report **in full**, and `maxLines` then only trims the copy
 inlined in the response. So `maxLines` stops being a correctness problem: set it
-low to keep the response small, and the saved file is still complete. When the
-inline copy is truncated the response says so explicitly, and `saved.dataRows`
-tells you what actually landed. Use an absolute path in or under the repo's
-scratch or report directory.
+low to keep the response small, and the saved file is still complete. The flag
+that says the inline copy was trimmed is `inlineTruncated`, and it describes only
+that copy; `saved.dataRows` tells you what actually landed on disk. Use an
+absolute path in or under the repo's scratch or report directory.
 
 This replaces retyping a report into a file by hand, which is where rows went
 missing — a report short one row still sums to a perfectly plausible number, and
 nothing downstream notices.
 
+**Every read takes `savePath` too**, not just the report downloads — `list_apps`,
+`list_versions`, `get_version`, `list_builds`, `list_customer_reviews` and the
+rest write their JSON result to the path you give. Use it for anything that ends
+up in a document. The same transcription failure applies: eight apps' shipping
+`minOsVersion` floors were once read out of tool responses and retyped into a
+cache by hand, and were wrong by the time anyone read them back.
+
 If you ever do have to transcribe a response by hand, guard it with the counts
-the response already carries: `dataRows` is the number of data rows, `rows` is
+the response already carries: `dataRows` is the number of data rows, `lines` is
 that plus the header line. Assert one of them after writing —
 
 ```python
-assert len(body) == payload["dataRows"]      # or: len(body) + 1 == payload["rows"]
+assert len(body) == payload["dataRows"]      # or: len(body) + 1 == payload["lines"]
 ```
 
 — so a dropped row fails loudly instead of quietly shaving a total.
@@ -234,6 +241,12 @@ The script refuses to work on a truncated file and exits non-zero. That is
 deliberate: re-fetch with a higher `maxLines` or a narrower window. Passing
 `--allow-truncated` to get past it turns every total in your report into a
 floor, and nothing downstream will remind you.
+
+Handed a saved **tool result** rather than a raw TSV, it follows the `saved.path`
+inside it and reads the complete file, so a result whose inline copy was trimmed
+is not refused when the full report is sitting on disk beside it. It says which
+file it read. The path is only used when its size matches the `saved.bytes` the
+result recorded, so a stale or half-written file is refused rather than totalled.
 
 It also warns when a file contains **exact duplicate rows**. Apple's reports are
 aggregates keyed by their dimension columns, so a repeated row means the file

@@ -40,6 +40,12 @@ jobs:
         run: pnpm run typecheck
       - name: Test 🧪
         run: pnpm run test
+      # The bundled skill ships a Python script that decides which bytes get
+      # totalled — inline copy or the complete file a result points at. Every
+      # other bug in it is loud; this one is silent and publishes a floor as a
+      # total, which is the thing the whole report envelope is built to prevent.
+      - name: Skill scripts 🧪
+        run: python3 -m unittest discover -s plugins/appstore-toolkit/skills/appstore-performance-intel/scripts -v
       - name: Build 📦
         run: pnpm run build
       # Every client config in the wild spells this server `npx -y <package>`,

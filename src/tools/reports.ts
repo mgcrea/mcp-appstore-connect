@@ -53,8 +53,8 @@ const SALES_REPORT_TYPES = [
  *
  * Apple terminates both the sales TSV and an analytics CSV segment with a
  * newline, so a naive `split` leaves a phantom empty line at the end. Counting
- * it overstates `rows`, and — the part that actually hurts — can tip a complete
- * report past `maxLines` and flag it `truncated`. That is not a cosmetic error:
+ * it overstates `lines`, and — the part that actually hurts — can tip a complete
+ * report past `maxLines` and flag it truncated. That is not a cosmetic error:
  * `report_stats.py` treats truncation as a hard error precisely so a floor is
  * never quoted as a total, so a false flag makes it refuse a file that lost
  * nothing.
@@ -91,19 +91,21 @@ export const previewReport = (tsv: string, maxLines: number): Record<string, unk
     else seen.add(line);
   }
 
-  const truncated = count > maxLines;
+  const inlineTruncated = count > maxLines;
   return {
     // Content lines with the header included, so this is one more than the
-    // number of data rows.
-    rows: count,
-    // The same count without the header, because `rows` reads as "data rows" to
-    // everyone who has not read this function. A caller verifying a transcription
-    // against `rows` is off by exactly one and concludes it dropped a row; both
-    // are published so neither reading can be wrong. Zero means Apple returned a
-    // header and nothing else.
+    // number of data rows. Named `lines` to match `saved.lines`: two names for
+    // one count was itself a transcription trap, since `rows` reads as "data
+    // rows" to everyone who has not read this function, and a caller checking a
+    // transcription against it is off by exactly one and concludes it dropped a
+    // row.
+    lines: count,
+    // Zero means Apple returned a header and nothing else.
     dataRows: Math.max(0, count - 1),
-    truncated,
-    ...(truncated ? { note: `Showing first ${maxLines} of ${count} lines.` } : {}),
+    // Describes `report` below — the copy inlined in this response — and nothing
+    // else. A saved file is never truncated.
+    inlineTruncated,
+    ...(inlineTruncated ? { inlineNote: `Inlining the first ${maxLines} of ${count} lines.` } : {}),
     // Only present when there is something to say, so its absence is not a
     // claim and its presence is never noise.
     ...(duplicateRows > 0
@@ -119,13 +121,30 @@ export const previewReport = (tsv: string, maxLines: number): Record<string, unk
       : {}),
     // Untruncated output is handed back byte-for-byte. Only the sliced path
     // drops the trailing newline, and there the text is already partial.
-    report: truncated ? lines.slice(0, maxLines).join("\n") : tsv,
+    report: inlineTruncated ? lines.slice(0, maxLines).join("\n") : tsv,
+    /**
+     * Deprecated alias for `inlineTruncated`, and unlike `rows` and `note` it is
+     * kept rather than scheduled for removal.
+     *
+     * The asymmetry is what decides it. A reader that loses `rows` or `note`
+     * fails loudly — a KeyError, an undefined, a failed assertion. A reader that
+     * loses `truncated` fails *silently* in the one direction that matters:
+     * `blob.get("truncated")` returns None, which is falsy, so a consumer that
+     * refuses to total a truncated report stops refusing and publishes a floor
+     * as a total. That is worse than the confusion the rename fixes, and it is
+     * unobservable. So this stays, with its exact old value, indefinitely.
+     */
+    truncated: inlineTruncated,
   };
 };
 
-/** The argument every report-DOWNLOAD tool takes, described once. Distinct from
- * the terse `savePathArg` every read shares: these three write the raw TSV/CSV,
- * and the completeness guarantee is the whole reason to reach for them. */
+/**
+ * The argument the three report DOWNLOADS take, described once.
+ *
+ * Distinct from the terse `savePathArg` every read shares: these write the raw
+ * TSV/CSV rather than a JSON envelope, and the completeness guarantee is the
+ * whole reason to reach for them, so it is worth the words here.
+ */
 const reportSavePathArg = z
   .string()
   .optional()
@@ -168,10 +187,11 @@ const saveReport = async (
 /**
  * Combine the inline preview with the saved-file record.
  *
- * `truncated` describes the preview only once a file has been written, and the
+ * The two describe different things once a file has been written, and the
  * distinction matters downstream: `report_stats.py` treats truncation as a hard
  * error so that a floor is never quoted as a total. Reading the saved file's
- * completeness as a loss would make it refuse a file that lost nothing.
+ * completeness as a loss would make it refuse a file that lost nothing — which
+ * is why `saved.path` is what it follows, and why the note below tells it to.
  */
 const previewAndSave = async (
   text: string,
@@ -184,11 +204,12 @@ const previewAndSave = async (
   return {
     ...preview,
     saved,
-    ...(preview.truncated === true
+    ...(preview.inlineTruncated === true
       ? {
           savedNote:
-            `The file at ${saved.path} holds all ${saved.dataRows} data rows. \`truncated\` ` +
-            `above describes the inlined copy only — read the file for totals.`,
+            `Read ${saved.path} for any total: it holds all ${saved.dataRows} data rows, while ` +
+            `the \`report\` inlined above stops at ${maxLines}. ` +
+            `report_stats.py follows this path on its own when handed this result.`,
         }
       : {}),
   };
