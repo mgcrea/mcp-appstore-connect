@@ -1995,9 +1995,46 @@ describe("reports require a vendor number", () => {
     expect(body).not.toHaveProperty("dataRows");
   });
 
-  it("reports a long-past period as undetermined rather than as a zero", async () => {
-    const fetchImpl = vi.fn(
-      async () => new Response(JSON.stringify({ errors: [] }), { status: 404 }),
+  const notFound = (): Response => new Response(JSON.stringify({ errors: [] }), { status: 404 });
+
+  /**
+   * The narrow residue the calendar cannot settle: a period old enough that its
+   * emptiness is a real question. Only here is a request worth spending.
+   */
+  it("proves a real zero by checking every day inside the month", async () => {
+    const fetchImpl = vi.fn(async () => notFound());
+    const client = await connect(
+      { ...baseConfig, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_download_sales_report",
+        arguments: { reportDate: "2026-03", frequency: "MONTHLY", vendorNumber: "85326407" },
+      }),
+    ) as { reason: string; confidence: string; evidence: Record<string, unknown> };
+
+    expect(body.reason).toBe("NO_ROWS");
+    expect(body.confidence).toBe("proven");
+    expect(body.evidence).toMatchObject({
+      probe: "DAILY",
+      periodsInSpan: 31,
+      periodsChecked: 31,
+      periodsUnknown: 0,
+    });
+    expect(fetchImpl.mock.calls).toHaveLength(32); // the month, plus 31 days
+  });
+
+  /**
+   * The whole point of the probe. One day with sales proves Apple owes a monthly
+   * report it has not built, so reporting the month as zero would understate it.
+   */
+  it("stops at the first day with rows and calls it lag, not a zero", async () => {
+    const fetchImpl = vi.fn(async (url: string) =>
+      new URL(String(url)).searchParams.get("filter[frequency]") === "DAILY"
+        ? gzipResponse("Provider\tUnits\nAPPLE\t41\n")
+        : notFound(),
     );
     const client = await connect(
       { ...baseConfig, maxRetries: 0 },
@@ -2009,12 +2046,140 @@ describe("reports require a vendor number", () => {
         name: "app_store_connect_download_sales_report",
         arguments: { reportDate: "2026-03", frequency: "MONTHLY", vendorNumber: "85326407" },
       }),
+    ) as { reason: string; confidence: string; remedy: string };
+
+    expect(body.reason).toBe("NOT_YET_GENERATED");
+    expect(body.confidence).toBe("proven");
+    expect(body.remedy).toContain("must NOT be recorded as zero");
+    // Sentinel first, then stop: the oldest day answered it, so nothing else was
+    // asked. Guards against this quietly becoming a 31-request sweep.
+    expect(fetchImpl.mock.calls).toHaveLength(2);
+    // The caller's own report type, not a substituted SALES: a SUBSCRIPTION 404
+    // probed with SALES dailies would prove nothing about subscriptions.
+    expect(new URL(callArgs(fetchImpl, 1)[0]).searchParams.get("filter[reportSubType]")).toBe(
+      "SUMMARY",
+    );
+  });
+
+  it("passes the caller's report type down to the probe", async () => {
+    const fetchImpl = vi.fn(async () => notFound());
+    const client = await connect(
+      { ...baseConfig, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+    await client.callTool({
+      name: "app_store_connect_download_sales_report",
+      arguments: {
+        reportDate: "2026-03-15",
+        frequency: "WEEKLY",
+        reportType: "SUBSCRIPTION",
+        vendorNumber: "85326407",
+      },
+    });
+
+    expect(new URL(callArgs(fetchImpl, 1)[0]).searchParams.get("filter[reportType]")).toBe(
+      "SUBSCRIPTION",
+    );
+  });
+
+  /**
+   * Turning the probe off must never silently upgrade a guess into a claim. An
+   * unchecked period is unmeasured, not empty.
+   */
+  it("answers UNDETERMINED with the probe off, and spends exactly one request", async () => {
+    const fetchImpl = vi.fn(async () => notFound());
+    const client = await connect(
+      { ...baseConfig, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_download_sales_report",
+        arguments: {
+          reportDate: "2026-03",
+          frequency: "MONTHLY",
+          vendorNumber: "85326407",
+          probe: false,
+        },
+      }),
     ) as { reason: string; confidence: string };
 
-    // Old enough that the calendar cannot settle it. Saying so beats guessing;
-    // an UNDETERMINED that reads as a zero is the failure being replaced.
     expect(body.reason).toBe("UNDETERMINED");
+    expect(body.reason).not.toBe("NO_ROWS");
     expect(body.confidence).toBe("none");
+    expect(fetchImpl.mock.calls).toHaveLength(1);
+  });
+
+  it("will not call a capped probe a zero", async () => {
+    const fetchImpl = vi.fn(async () => notFound());
+    const client = await connect(
+      { ...baseConfig, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_download_sales_report",
+        arguments: {
+          reportDate: "2026-03",
+          frequency: "MONTHLY",
+          vendorNumber: "85326407",
+          maxProbeDays: 5,
+        },
+      }),
+    ) as { reason: string; evidence: Record<string, unknown> };
+
+    expect(body.reason).toBe("NO_ROWS_OBSERVED");
+    expect(body.reason).not.toBe("NO_ROWS");
+    expect(body.evidence).toMatchObject({ periodsChecked: 5, periodsInSpan: 31 });
+  });
+
+  /** A transient Apple fault must not be able to manufacture a zero. */
+  it("degrades a failing probe day to unknown rather than to empty", async () => {
+    let n = 0;
+    const fetchImpl = vi.fn(async () => {
+      n += 1;
+      return n === 3 ? new Response("{}", { status: 500 }) : notFound();
+    });
+    const client = await connect(
+      { ...baseConfig, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_download_sales_report",
+        arguments: { reportDate: "2026-03-15", frequency: "WEEKLY", vendorNumber: "85326407" },
+      }),
+    ) as { reason: string; evidence: Record<string, unknown> };
+
+    expect(body.reason).toBe("NO_ROWS_OBSERVED");
+    expect(body.reason).not.toBe("NO_ROWS");
+    expect(body.evidence).toMatchObject({ periodsUnknown: 1 });
+  });
+
+  it("claims nothing when Apple rejects the probe's parameters", async () => {
+    let n = 0;
+    const fetchImpl = vi.fn(async () => {
+      n += 1;
+      return n === 1 ? notFound() : new Response("{}", { status: 400 });
+    });
+    const client = await connect(
+      { ...baseConfig, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_download_sales_report",
+        arguments: { reportDate: "2026-03-15", frequency: "WEEKLY", vendorNumber: "85326407" },
+      }),
+    ) as { reason: string; evidence: Record<string, unknown>; remedy: string };
+
+    expect(body.reason).toBe("UNDETERMINED");
+    expect(body.evidence).toMatchObject({ probeUnsupported: true });
+    expect(body.remedy).toContain("Do NOT record");
   });
 
   it("refuses to record a period that has not started", async () => {
@@ -2177,10 +2342,12 @@ describe("download_finance_report", () => {
 
     expect(body.empty).toBe(true);
     expect(body.note).toContain("fiscal 2026-07 in region US");
-    // Finance can never claim a proven zero: dating a report that does not exist
-    // would need Apple's 4-4-5 calendar modelled, which this file refuses to do.
-    expect(body.reason).toBe("UNDETERMINED");
+    // Finance can never claim a proven zero: separating publication lag from a
+    // real zero would need Apple's 4-4-5 calendar modelled, which this file
+    // refuses to do.
+    expect(body.reason).toBe("NO_ROWS_OBSERVED");
     expect(body.reason).not.toBe("NO_ROWS");
+    expect(body.reason).not.toBe("NOT_YET_GENERATED");
     // Null, not absent, so nobody reads "calendar July was zero" out of this.
     expect(body.period).toMatchObject({ requestedFiscalPeriod: "2026-07", coverage: null });
     // The checks that do apply here: publication lag, region, fiscal calendar.
@@ -2188,6 +2355,55 @@ describe("download_finance_report", () => {
     expect(body.remedy).toContain("4-4-5");
     // And not the one that does not.
     expect(JSON.stringify(body)).not.toContain("DAILY");
+  });
+
+  /**
+   * The one thing finance can actually prove. A region can be empty while the
+   * account is not, and the old prose could only suggest checking ZZ by hand.
+   */
+  it("proves an empty region against the all-regions report", async () => {
+    const fetchImpl = vi.fn(async (url: string) =>
+      new URL(String(url)).searchParams.get("filter[regionCode]") === "ZZ"
+        ? gzipResponse(FINANCE_TSV)
+        : new Response(JSON.stringify({ errors: [] }), { status: 404 }),
+    );
+    const client = await connect(
+      { ...baseConfig, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_download_finance_report",
+        arguments: { reportDate: "2026-07", regionCode: "US", vendorNumber: VENDOR },
+      }),
+    ) as { reason: string; confidence: string; evidence: Record<string, unknown>; remedy: string };
+
+    expect(body.reason).toBe("REGION_EMPTY");
+    expect(body.confidence).toBe("proven");
+    expect(body.evidence).toMatchObject({ probedRegion: "ZZ" });
+    expect(body.remedy).toContain("Record 0 for this region only");
+    expect(fetchImpl.mock.calls).toHaveLength(2);
+  });
+
+  it("does not re-probe ZZ against itself", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ errors: [] }), { status: 404 }),
+    );
+    const client = await connect(
+      { ...baseConfig, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_download_finance_report",
+        arguments: { reportDate: "2026-07", regionCode: "ZZ", vendorNumber: VENDOR },
+      }),
+    ) as { reason: string };
+
+    expect(body.reason).toBe("NO_ROWS_OBSERVED");
+    expect(fetchImpl.mock.calls).toHaveLength(1);
   });
 });
 

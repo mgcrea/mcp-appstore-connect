@@ -6,9 +6,13 @@ import { AppStoreConnectApiError } from "#/client/errors";
 import { attributesOf, type Rec, resourcesOf, summarizeResponse } from "#/client/shape";
 import {
   classifyByCalendar,
+  classifyProbe,
   type Confidence,
   type EmptyReason,
+  type Frequency,
   periodSpan,
+  type ProbedPeriod,
+  stepDown,
 } from "#/reports/period";
 import type { ToolContext } from "#/tools/index";
 import {
@@ -602,6 +606,80 @@ const emptyNote = (period: string): string =>
   `activity and a period it has not assembled yet, so the reason below says which — read it ` +
   `before recording a zero.`;
 
+/** Data rows in a downloaded report, by the same trailing-newline rule as previewReport. */
+const dataRowCount = (tsv: string): number => {
+  const lines = tsv.split("\n");
+  let count = lines.length;
+  while (count > 0 && lines[count - 1] === "") count -= 1;
+  return Math.max(0, count - 1);
+};
+
+/** Raised when Apple rejects the probe's parameters, so no verdict is claimed from it. */
+class ProbeUnsupported extends Error {}
+
+/**
+ * Ask a finer granularity whether the coarse period really was quiet.
+ *
+ * Sentinel first — the OLDEST sub-period, the one furthest past the daily lag,
+ * so its own 404 is meaningful — then batches of seven, checking between them.
+ * That collapses the common lag case to two requests total: one day with rows
+ * proves the coarse report should exist and there is nothing left to establish.
+ *
+ * Calls `client.downloadReport` directly, never through `downloadOrEmpty`. A
+ * probe that recursed into probes would be a 31x31 request bomb, and the same
+ * coupling is already flagged in probeVendor's tests.
+ */
+const probeSubPeriods = async (
+  client: AppStoreConnectClient,
+  params: { vendor: string; reportType: string; reportSubType: string },
+  step: { frequency: Frequency; dates: string[] },
+  maxProbes: number,
+  now: Date,
+): Promise<ProbedPeriod[]> => {
+  const dates = step.dates.slice(0, maxProbes);
+  const probed: ProbedPeriod[] = [];
+
+  const one = async (date: string): Promise<ProbedPeriod> => {
+    try {
+      const tsv = await client.downloadReport("/v1/salesReports", {
+        "filter[frequency]": step.frequency,
+        // The caller's report type is passed through unchanged: a SUBSCRIPTION
+        // 404 probed with SALES dailies proves nothing about subscriptions.
+        "filter[reportType]": params.reportType,
+        "filter[reportSubType]": params.reportSubType,
+        "filter[vendorNumber]": params.vendor,
+        "filter[reportDate]": date,
+      });
+      return { date, rows: dataRowCount(tsv) };
+    } catch (err) {
+      if (!(err instanceof AppStoreConnectApiError)) throw err;
+      // Apple refuses this reportType/subType at this granularity. Nothing can
+      // be concluded, so say so rather than reading a rejection as a zero.
+      if (err.status === 400) throw new ProbeUnsupported(err.message);
+      if (err.status === 404) {
+        // A 404 on a sub-period is only evidence of emptiness once that
+        // sub-period is itself past the lag; inside it, it is the same
+        // ambiguity one level down.
+        const verdict = classifyByCalendar(step.frequency, date, now);
+        return { date, rows: verdict === undefined ? 0 : "unknown" };
+      }
+      // A transient fault must never be counted as an empty day — that is how a
+      // 5xx manufactures a zero.
+      return { date, rows: "unknown" };
+    }
+  };
+
+  // Oldest first: its 404 is the one that carries information.
+  probed.push(await one(dates[0] as string));
+  if (typeof probed[0]?.rows === "number" && probed[0].rows > 0) return probed;
+
+  for (let i = 1; i < dates.length; i += 7) {
+    probed.push(...(await Promise.all(dates.slice(i, i + 7).map(one))));
+    if (probed.some((p) => typeof p.rows === "number" && p.rows > 0)) break;
+  }
+  return probed;
+};
+
 /**
  * What a 404 on a sales report means, from the calendar alone.
  *
@@ -615,6 +693,13 @@ const emptySalesPeriod = async (
   frequency: (typeof FREQUENCIES)[number],
   reportDate: string,
   now: Date,
+  probe?: {
+    client: AppStoreConnectClient;
+    vendor: string;
+    reportType: string;
+    reportSubType: string;
+    maxProbeDays: number;
+  },
 ): Promise<EmptyPeriod> => {
   const span = periodSpan(frequency, reportDate);
   const calendar = classifyByCalendar(frequency, reportDate, now);
@@ -638,15 +723,48 @@ const emptySalesPeriod = async (
     };
   }
 
-  // Old enough that the calendar cannot settle it. Until the probe lands, say
-  // so rather than guessing — an UNDETERMINED that reads as a zero is the whole
-  // failure this replaces.
+  // Old enough that the calendar cannot settle it — the narrow, genuinely
+  // ambiguous residue. This is the only case worth spending requests on.
+  const step = probe === undefined ? undefined : stepDown(frequency, reportDate);
+  if (probe !== undefined && step !== undefined) {
+    try {
+      const probed = await probeSubPeriods(probe.client, probe, step, probe.maxProbeDays, now);
+      const verdict = classifyProbe(probed, step.dates.length, step.frequency);
+      return {
+        empty: true,
+        reason: verdict.reason,
+        confidence: verdict.confidence,
+        period,
+        evidence: { ...verdict.evidence, requests: 1 + probed.length },
+        note: emptyNote(`${frequency} ${reportDate}`),
+        remedy: PROBE_REMEDY[verdict.reason] ?? SALES_EMPTY_REMEDY,
+      };
+    } catch (err) {
+      if (!(err instanceof ProbeUnsupported)) throw err;
+      return {
+        empty: true,
+        reason: "UNDETERMINED",
+        confidence: "none",
+        period,
+        evidence: { requests: 2, probeUnsupported: true, probeError: err.message },
+        note: emptyNote(`${frequency} ${reportDate}`),
+        remedy:
+          `Apple rejected a ${step.frequency} probe for reportType ${probe.reportType} / ` +
+          `${probe.reportSubType}, so nothing was established about this period. Do NOT record ` +
+          `a zero. Check that this reportType/reportSubType pair exists at a finer granularity.`,
+      };
+    }
+  }
+
+  // Probe off, or nothing finer to ask. Say nothing was established rather than
+  // guessing — turning the probe off must never silently upgrade a guess into a
+  // claim, which is what a NO_ROWS here would be.
   return {
     empty: true,
     reason: "UNDETERMINED",
     confidence: "none",
     period,
-    evidence: { requests: 1 },
+    evidence: { requests: 1, ...(probe === undefined ? { probed: false } : {}) },
     note: emptyNote(`${frequency} ${reportDate}`),
     remedy: SALES_EMPTY_REMEDY,
   };
@@ -665,21 +783,66 @@ const emptySalesPeriod = async (
 const emptyFinancePeriod = async (
   reportDate: string,
   regionCode: string,
-): Promise<EmptyPeriod> => ({
-  empty: true,
-  reason: "UNDETERMINED",
-  confidence: "none",
-  period: {
-    requestedFiscalPeriod: reportDate,
-    regionCode,
-    // Null rather than absent: nobody should read "calendar July was zero" out
-    // of "fiscal 2026-07 returned nothing".
-    coverage: null,
-  },
-  evidence: { requests: 1 },
-  note: emptyNote(`fiscal ${reportDate} in region ${regionCode}`),
-  remedy: FINANCE_EMPTY_REMEDY,
-});
+  probe?: { client: AppStoreConnectClient; vendor: string },
+): Promise<EmptyPeriod> => {
+  const base = {
+    empty: true as const,
+    period: {
+      requestedFiscalPeriod: reportDate,
+      regionCode,
+      // Null rather than absent: nobody should read "calendar July was zero" out
+      // of "fiscal 2026-07 returned nothing".
+      coverage: null,
+    },
+    note: emptyNote(`fiscal ${reportDate} in region ${regionCode}`),
+  };
+
+  // The one thing finance can actually establish. ZZ covers every region, so
+  // rows there prove the account was not quiet and this region was — a
+  // distinction the prose could only suggest.
+  if (probe !== undefined && regionCode.toUpperCase() !== "ZZ") {
+    try {
+      const tsv = await probe.client.downloadReport("/v1/financeReports", {
+        "filter[regionCode]": "ZZ",
+        "filter[reportType]": "FINANCIAL",
+        "filter[vendorNumber]": probe.vendor,
+        "filter[reportDate]": reportDate,
+      });
+      if (dataRowCount(tsv) > 0) {
+        return {
+          ...base,
+          reason: "REGION_EMPTY",
+          confidence: "proven",
+          evidence: { probedRegion: "ZZ", rowsInAllRegions: dataRowCount(tsv), requests: 2 },
+          remedy:
+            `Region ${regionCode} had no activity in fiscal ${reportDate}, but the account did — ` +
+            `the all-regions report (ZZ) has rows. Record 0 for this region only, and read ZZ ` +
+            `for the account total.`,
+        };
+      }
+    } catch {
+      // ZZ failing too tells us nothing extra; fall through to the honest
+      // "undetermined" rather than reading one failure as evidence about another.
+    }
+  }
+
+  return {
+    ...base,
+    // Never NO_ROWS and never NOT_YET_GENERATED. Separating publication lag from
+    // a real zero here would need Apple's 4-4-5 fiscal calendar modelled, and
+    // financeCoverage deliberately reads dates out of the report rather than
+    // deriving them — inventing that certainty is what this change removes.
+    reason: "NO_ROWS_OBSERVED",
+    confidence: "bounded",
+    evidence: {
+      ...(probe !== undefined && regionCode.toUpperCase() !== "ZZ"
+        ? { probedRegion: "ZZ", rowsInAllRegions: 0 }
+        : {}),
+      requests: probe === undefined ? 1 : 2,
+    },
+    remedy: FINANCE_EMPTY_REMEDY,
+  };
+};
 
 /**
  * What to do about a reason the calendar settled on its own. Each is specific:
@@ -697,6 +860,21 @@ const CALENDAR_REMEDY: Partial<Record<EmptyReason, string>> = {
   BEYOND_RETENTION:
     "This period is older than Apple serves sales reports for, so its absence says nothing about " +
     "sales. If you have the figures, they came from a report downloaded at the time.",
+};
+
+/** What to say once the probe has actually looked. */
+const PROBE_REMEDY: Partial<Record<EmptyReason, string>> = {
+  NOT_YET_GENERATED:
+    "A finer-grained period inside this one HAS rows, which proves Apple simply has not " +
+    "assembled the coarser report yet. This is reporting lag and must NOT be recorded as zero. " +
+    "Re-ask in a few days, or sum the finer periods if you need the figure now.",
+  NO_ROWS:
+    "Every sub-period inside this one was checked and every one was empty, so this is a real " +
+    "zero. Record it as 0.",
+  NO_ROWS_OBSERVED:
+    "Every sub-period that could be checked was empty, but not all of them were reachable — see " +
+    "evidence.periodsUnknown and periodsChecked. Treat this as unmeasured rather than as a zero; " +
+    "raise maxProbeDays or retry to close the gap.",
 };
 
 /** Sales reports roll up from the dailies, so a finer granularity settles it. */
@@ -945,6 +1123,26 @@ export const registerReportTools = (
             "Truncate the inlined TSV to this many lines. Defaults to 500. Does not affect the " +
               "file written by savePath.",
           ),
+        probe: z
+          .boolean()
+          .default(true)
+          .describe(
+            "When Apple returns no rows for a period, check a finer granularity before " +
+              "answering, so `reason` distinguishes a real zero from a report Apple has not " +
+              "assembled yet. Costs nothing on the normal path and nothing when the calendar " +
+              "already settles it. Turning it off never produces NO_ROWS — you get UNDETERMINED, " +
+              "because an unchecked period is not a zero.",
+          ),
+        maxProbeDays: z
+          .number()
+          .int()
+          .min(1)
+          .max(366)
+          .default(31)
+          .describe(
+            "Cap on sub-periods checked by the probe. Defaults to 31, a full month. Hitting the " +
+              "cap yields NO_ROWS_OBSERVED, never NO_ROWS.",
+          ),
         savePath: reportSavePathArg,
       }),
       annotations: { readOnlyHint: true },
@@ -959,6 +1157,8 @@ export const registerReportTools = (
       sku,
       includeInAppPurchases,
       maxLines,
+      probe,
+      maxProbeDays,
       savePath,
     }) =>
       wrap(async () => {
@@ -973,7 +1173,13 @@ export const registerReportTools = (
                 "filter[vendorNumber]": vendor,
                 "filter[reportDate]": reportDate,
               }),
-            () => emptySalesPeriod(frequency, reportDate, new Date()),
+            () =>
+              emptySalesPeriod(
+                frequency,
+                reportDate,
+                new Date(),
+                probe ? { client, vendor, reportType, reportSubType, maxProbeDays } : undefined,
+              ),
           ),
         );
         if (typeof outcome !== "string") {
@@ -1047,11 +1253,19 @@ export const registerReportTools = (
             "Truncate the inlined TSV to this many lines. Defaults to 500. Does not affect the " +
               "file written by savePath.",
           ),
+        probe: z
+          .boolean()
+          .default(true)
+          .describe(
+            "When this region has no rows, retry once against regionCode ZZ (all regions) so the " +
+              "answer can distinguish an empty REGION from an empty account. Costs one request, " +
+              "and only on the empty path.",
+          ),
         savePath: reportSavePathArg,
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ reportDate, regionCode, vendorNumber, maxLines, savePath }) =>
+    async ({ reportDate, regionCode, vendorNumber, maxLines, probe, savePath }) =>
       wrap(async () => {
         const vendor = requireVendor(vendorNumber, ctx.vendorNumber);
         const outcome = await withVendorHint(vendor, () =>
@@ -1063,7 +1277,8 @@ export const registerReportTools = (
                 "filter[vendorNumber]": vendor,
                 "filter[reportDate]": reportDate,
               }),
-            () => emptyFinancePeriod(reportDate, regionCode),
+            () =>
+              emptyFinancePeriod(reportDate, regionCode, probe ? { client, vendor } : undefined),
           ),
         );
         if (typeof outcome !== "string") {
