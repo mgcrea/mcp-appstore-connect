@@ -5261,6 +5261,9 @@ describe("bundle id capabilities", () => {
 
     const [url] = callArgs(fetchImpl);
     expect(url).toContain("/v1/bundleIds/bid-1/bundleIdCapabilities");
+    // Apple rejects `limit` on this relationship with PARAMETER_ERROR.ILLEGAL
+    // rather than ignoring it, so sending one fails the whole call.
+    expect(new URL(url).search).toBe("");
     // The id disable_capability needs has to survive the summarizer.
     expect(JSON.stringify(body)).toContain("cap-1");
   });

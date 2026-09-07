@@ -158,14 +158,17 @@ export const registerBundleIdTools = (
         "ids that disable_capability needs, and is the only way to check a capability the API " +
         "cannot set — one ticked by hand in the developer portal, such as WEATHERKIT, is " +
         "reported here even though enable_capability is refused it.",
-      inputSchema: z.object({ bundleId: bundleIdArg, limit: limitArg, savePath: savePathArg }),
+      inputSchema: z.object({ bundleId: bundleIdArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
-    async ({ bundleId, limit, savePath }) =>
+    // No `limit`, unlike every other list here. This relationship is one Apple
+    // does not paginate, and it does not ignore the parameter either — it
+    // answers `PARAMETER_ERROR.ILLEGAL`, so a defaulted limit would fail every
+    // call rather than the ones that passed it. An App ID's capabilities are a
+    // short list; the whole set comes back.
+    async ({ bundleId, savePath }) =>
       wrapSaved(savePath, async () =>
-        summarizeResponse(
-          await client.get(`/v1/bundleIds/${bundleId}/bundleIdCapabilities`, compact({ limit })),
-        ),
+        summarizeResponse(await client.get(`/v1/bundleIds/${bundleId}/bundleIdCapabilities`)),
       ),
   );
 
