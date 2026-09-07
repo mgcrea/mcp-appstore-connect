@@ -139,6 +139,7 @@ describe("tool registration", () => {
       "app_store_connect_get_analytics_status",
       "app_store_connect_list_users",
       "app_store_connect_list_bundle_ids",
+      "app_store_connect_list_capabilities",
       "app_store_connect_list_devices",
       "app_store_connect_list_customer_reviews",
       "app_store_connect_list_iap_localizations",
@@ -5213,5 +5214,189 @@ describe("partial pages", () => {
     ) as Record<string, unknown>;
 
     expect(body).not.toHaveProperty("incomplete");
+  });
+});
+
+describe("bundle id capabilities", () => {
+  /**
+   * Apple's answer to `WEATHERKIT`, captured from a live account — the accepted
+   * list is elided, nothing else is. The `source.pointer` is what the hint keys
+   * off, so it has to be here exactly as Apple sends it.
+   */
+  const rejectsType = (pointer = "/data/attributes/capabilityType"): Response =>
+    new Response(
+      JSON.stringify({
+        errors: [
+          {
+            id: "035a9ac5-7f98-447a-a56b-5455fe377d44",
+            status: "409",
+            code: "ENTITY_ERROR.ATTRIBUTE.TYPE",
+            title: "An attribute in the provided entity has the wrong type",
+            detail:
+              "'WEATHERKIT' is not a valid value for the attribute 'capabilityType'. Expected " +
+              "one of: 'ICLOUD', 'IN_APP_PURCHASE', 'GAME_CENTER', 'PUSH_NOTIFICATIONS'",
+            source: { pointer },
+          },
+        ],
+      }),
+      { status: 409, headers: { "content-type": "application/json" } },
+    );
+
+  it("lists the capabilities on a bundle id", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        data: [
+          { type: "bundleIdCapabilities", id: "cap-1", attributes: { capabilityType: "ICLOUD" } },
+        ],
+      }),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_capabilities",
+        arguments: { bundleId: "bid-1" },
+      }),
+    );
+
+    const [url] = callArgs(fetchImpl);
+    expect(url).toContain("/v1/bundleIds/bid-1/bundleIdCapabilities");
+    // The id disable_capability needs has to survive the summarizer.
+    expect(JSON.stringify(body)).toContain("cap-1");
+  });
+
+  /**
+   * The whole point of the hint: Apple's own answer lists the values it accepts
+   * and says nothing about the portal, so the caller reads a permanent "cannot
+   * be done here" as a typo and retries with a different spelling.
+   */
+  it("sends a portal-only capability to the portal, naming the App ID", async () => {
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) =>
+      init?.method === "POST"
+        ? rejectsType()
+        : jsonResponse({
+            data: {
+              type: "bundleIds",
+              id: "bid-1",
+              attributes: { name: "Canopy", identifier: "com.acme.canopy" },
+            },
+          }),
+    );
+    const client = await connect(
+      { ...baseConfig, allowWrites: true, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const result = await client.callTool({
+      name: "app_store_connect_enable_capability",
+      arguments: { bundleId: "bid-1", capabilityType: "WEATHERKIT" },
+    });
+
+    expect(result.isError).toBe(true);
+    const message = String(payloadOf(result).error);
+    expect(message).toContain("App Services");
+    expect(message).toContain("Canopy (com.acme.canopy)");
+    expect(message).toContain("app_store_connect_list_capabilities");
+    // Apple's own detail survives, so the accepted values stay visible.
+    expect(message).toContain("'capabilityType'");
+  });
+
+  it("still names the capability when the App ID cannot be read back", async () => {
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) =>
+      init?.method === "POST"
+        ? rejectsType()
+        : new Response(JSON.stringify({ errors: [{ code: "NOT_FOUND" }] }), {
+            status: 404,
+            headers: { "content-type": "application/json" },
+          }),
+    );
+    const client = await connect(
+      { ...baseConfig, allowWrites: true, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const result = await client.callTool({
+      name: "app_store_connect_enable_capability",
+      arguments: { bundleId: "bid-1", capabilityType: "WEATHERKIT" },
+    });
+
+    expect(result.isError).toBe(true);
+    // The lookup is a nicety; losing it must not lose the answer.
+    expect(String(payloadOf(result).error)).toContain("bid-1");
+  });
+
+  /**
+   * Nothing is validated locally against Apple's enum, so the day Apple adds a
+   * capability the tool starts working without a release.
+   */
+  it("forwards an unknown capability type instead of refusing it locally", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        data: {
+          type: "bundleIdCapabilities",
+          id: "cap-9",
+          attributes: { capabilityType: "WEATHERKIT" },
+        },
+      }),
+    );
+    const client = await connect(
+      { ...baseConfig, allowWrites: true },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const result = await client.callTool({
+      name: "app_store_connect_enable_capability",
+      arguments: { bundleId: "bid-1", capabilityType: "WEATHERKIT" },
+    });
+
+    expect(result.isError).toBeFalsy();
+    const [, init] = callArgs(fetchImpl);
+    expect(JSON.parse(String(init.body)).data.attributes.capabilityType).toBe("WEATHERKIT");
+  });
+
+  /**
+   * Same code, same status, different attribute — `settings` is the other thing
+   * this POST can get wrong, and it has nothing to do with the portal.
+   */
+  it("does not blame the portal for a 409 about another attribute", async () => {
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) =>
+      init?.method === "POST" ? rejectsType("/data/attributes/settings") : jsonResponse({}),
+    );
+    const client = await connect(
+      { ...baseConfig, allowWrites: true, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const result = await client.callTool({
+      name: "app_store_connect_enable_capability",
+      arguments: { bundleId: "bid-1", capabilityType: "ICLOUD", settings: [{ key: "nonsense" }] },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(String(payloadOf(result).error)).not.toContain("App Services");
+  });
+
+  it("leaves an unrelated failure alone", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ errors: [{ code: "FORBIDDEN_ERROR" }] }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const client = await connect(
+      { ...baseConfig, allowWrites: true, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const result = await client.callTool({
+      name: "app_store_connect_enable_capability",
+      arguments: { bundleId: "bid-1", capabilityType: "ICLOUD" },
+    });
+
+    expect(result.isError).toBe(true);
+    const message = String(payloadOf(result).error);
+    expect(message).toContain("FORBIDDEN_ERROR");
+    expect(message).not.toContain("App Services");
   });
 });

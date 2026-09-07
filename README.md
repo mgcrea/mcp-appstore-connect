@@ -283,7 +283,7 @@ A **free** app still needs a price: "free" is a price point, not the absence of 
 
 **Users** — `list_users`
 
-**Bundle IDs** — `list_bundle_ids`, `get_bundle_id`, _`create_bundle_id`_\*, _`enable_capability`_\*, _`disable_capability`_\*†
+**Bundle IDs** — `list_bundle_ids`, `get_bundle_id`, `list_capabilities`, _`create_bundle_id`_\*, _`enable_capability`_\*, _`disable_capability`_\*† — **only the capabilities that predate the App Services page can be enabled through the API.** Apple's `capabilityType` enum never grew past them, so WeatherKit, Family Controls, Group Activities and everything newer answer a 409 that lists the values it does take and says nothing about where the rest live — which reads as a misspelling rather than as impossible. `enable_capability` names the portal page to tick instead. The read side is not restricted: `list_capabilities` reports a portal-ticked capability like `WEATHERKIT` normally, so a manual step can still be verified from here, and it is where `disable_capability`'s capability id comes from.
 
 **Devices** — `list_devices`, _`register_device`_\*
 
