@@ -300,7 +300,8 @@ export const registerScreenshotTools = (
         "flow: finds or creates the set for the device type, reserves the asset, uploads the " +
         "bytes, commits the checksum, then waits for processing. App Store Connect validates " +
         "image dimensions during processing, so a wrongly-sized image fails here with the exact " +
-        "reason. The version must be editable (PREPARE_FOR_SUBMISSION or DEVELOPER_REJECTED), " +
+        "reason. The version must be editable (PREPARE_FOR_SUBMISSION, or DEVELOPER_REJECTED, " +
+        "REJECTED, METADATA_REJECTED or INVALID_BINARY after a rejection), " +
         "and a set holds at most 10 screenshots.",
       inputSchema: z.object({
         localizationId: localizationIdArg,

@@ -384,8 +384,10 @@ app_store_connect_submit_version_for_review { versionId, dryRun: true, confirm: 
 app_store_connect_submit_version_for_review { versionId, confirm: true }
 ```
 
-The version must be `PREPARE_FOR_SUBMISSION` or `DEVELOPER_REJECTED`, and the build must
-be `VALID`, unexpired, and carry the same version string. Everything Apple requires —
+The version must be `PREPARE_FOR_SUBMISSION`, or back after a rejection: `DEVELOPER_REJECTED`
+(you withdrew it), `REJECTED` or `METADATA_REJECTED` (App Review sent it back) or
+`INVALID_BINARY`. After an App Review rejection, swap the build with `set_version_build`
+and resubmit; there is no need to create a new version. The build must be `VALID`, unexpired, and carry the same version string. Everything Apple requires —
 screenshots, age rating, export compliance, review details — must already be in place, and
 **`dryRun` is how you find out what is not.** Apple only adjudicates readiness when the
 version is added to a submission, so the dry run goes that far and stops before handing

@@ -30,8 +30,21 @@ const localizationIdArg = z
     "The appStoreVersionLocalization id (from app_store_connect_list_version_localizations).",
   );
 
-/** Apple only accepts a build or attribute change while the version is still editable. */
-const EDITABLE_STATES = ["PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED"];
+/**
+ * Apple only accepts a build or attribute change while the version is still editable:
+ * not yet submitted, or back with us after a rejection. That includes a rejection by
+ * App Review (REJECTED, METADATA_REJECTED) and a binary Apple refused (INVALID_BINARY),
+ * not only a submission we withdrew (DEVELOPER_REJECTED) — the web UI swaps the build
+ * on a REJECTED version, and fastlane's editable-version lookup lists the same set.
+ * WAITING_FOR_REVIEW is left out: it is still queued, and has to be cancelled first.
+ */
+const EDITABLE_STATES = [
+  "PREPARE_FOR_SUBMISSION",
+  "DEVELOPER_REJECTED",
+  "REJECTED",
+  "METADATA_REJECTED",
+  "INVALID_BINARY",
+];
 
 /** The one state a manual release request applies to: approved, waiting on us. */
 const RELEASABLE_STATE = "PENDING_DEVELOPER_RELEASE";
@@ -85,7 +98,7 @@ const editableStateProblem = (appStoreState: unknown, change: string): string | 
   }
   return (
     `the version is ${appStoreState}; ${change} can only be changed while it is ` +
-    `${EDITABLE_STATES.join(" or ")}`
+    `${EDITABLE_STATES.slice(0, -1).join(", ")} or ${EDITABLE_STATES.at(-1)}`
   );
 };
 
@@ -349,8 +362,9 @@ export const registerVersionTools = (
         "Update an App Store version's own attributes — most usefully releaseType, which decides " +
         "whether an approved version goes live automatically (AFTER_APPROVAL), waits for you to " +
         "release it (MANUAL), or ships at a set time (SCHEDULED). Also renames the version or " +
-        "sets its copyright. Only the fields you pass are changed. The version must still be " +
-        "PREPARE_FOR_SUBMISSION or DEVELOPER_REJECTED. To change a version's build instead, use " +
+        "sets its copyright. Only the fields you pass are changed. The version must not be " +
+        "submitted yet (PREPARE_FOR_SUBMISSION) or must be back after a rejection " +
+        "(DEVELOPER_REJECTED, REJECTED, METADATA_REJECTED, INVALID_BINARY). To change a version's build instead, use " +
         "app_store_connect_set_version_build.",
       inputSchema: z.object({
         versionId: versionIdArg,
@@ -434,7 +448,9 @@ export const registerVersionTools = (
       description:
         "Attach a build to an App Store version — the last step before submitting. Pass detach: " +
         "true instead of a buildId to remove the currently attached build. The version must be " +
-        "PREPARE_FOR_SUBMISSION or DEVELOPER_REJECTED, and the build must be VALID, unexpired, " +
+        "PREPARE_FOR_SUBMISSION or back after a rejection (DEVELOPER_REJECTED, REJECTED, " +
+        "METADATA_REJECTED, INVALID_BINARY) — swapping the build on an App Review rejection " +
+        "and resubmitting works — and the build must be VALID, unexpired, " +
         "and belong to the same app and version string.",
       inputSchema: z.object({
         versionId: versionIdArg,

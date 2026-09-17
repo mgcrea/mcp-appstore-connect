@@ -738,6 +738,40 @@ describe("set_version_build", () => {
     expect(patchCall(fetchImpl)).toBeUndefined();
   });
 
+  // The rejected iOS 1.8.1 case: App Review's REJECTED is not our DEVELOPER_REJECTED,
+  // yet the web UI swaps its build and resubmits — the tool must not be stricter.
+  it.each(["DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED", "INVALID_BINARY"])(
+    "attaches and detaches on a %s version",
+    async (appStoreState) => {
+      const attach = routed(versionBody({ appStoreState }), buildBody());
+      const attached = await callTool({ versionId: VERSION_ID, buildId: BUILD_ID }, attach);
+      expect(attached.isError).toBeFalsy();
+      expect(patchCall(attach)).toBeDefined();
+
+      const detach = routed(versionBody({ appStoreState }), buildBody());
+      const detached = await callTool({ versionId: VERSION_ID, detach: true }, detach);
+      expect(detached.isError).toBeFalsy();
+      expect(patchCall(detach)).toBeDefined();
+    },
+  );
+
+  it.each(["WAITING_FOR_REVIEW", "IN_REVIEW", "READY_FOR_REVIEW", "PENDING_DEVELOPER_RELEASE"])(
+    "still refuses a %s version, naming every editable state",
+    async (appStoreState) => {
+      const fetchImpl = routed(versionBody({ appStoreState }), buildBody());
+
+      const result = await callTool({ versionId: VERSION_ID, buildId: BUILD_ID }, fetchImpl);
+
+      expect(result.isError).toBe(true);
+      const text = (result.content as { text: string }[])[0]?.text ?? "";
+      expect(text).toContain(appStoreState);
+      expect(text).toContain(
+        "PREPARE_FOR_SUBMISSION, DEVELOPER_REJECTED, REJECTED, METADATA_REJECTED or INVALID_BINARY",
+      );
+      expect(patchCall(fetchImpl)).toBeUndefined();
+    },
+  );
+
   it("reports every failing precondition at once", async () => {
     const fetchImpl = routed(
       versionBody({ appStoreState: "READY_FOR_SALE" }),
@@ -941,6 +975,15 @@ describe("update_version", () => {
     expect(result.isError).toBe(true);
     expect((result.content as { text: string }[])[0]?.text ?? "").toContain("READY_FOR_SALE");
     expect(patchCall(fetchImpl)).toBeUndefined();
+  });
+
+  it("updates a version App Review rejected", async () => {
+    const fetchImpl = routed("REJECTED");
+
+    const result = await callTool({ versionId: VERSION_ID, releaseType: "MANUAL" }, fetchImpl);
+
+    expect(result.isError).toBeFalsy();
+    expect(patchCall(fetchImpl)).toBeDefined();
   });
 
   it("creates a version already set to manual release", async () => {
