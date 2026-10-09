@@ -80,6 +80,15 @@ export const SALES_RETENTION_DAYS = 365;
 const daysInMonth = (year: number, month: number): number =>
   new Date(Date.UTC(year, month, 0)).getUTCDate();
 
+/** Every day from `start` to `end` inclusive, as ISO dates. */
+const spanBetween = (start: string, end: string): PeriodSpan => {
+  const days: string[] = [];
+  for (let t = utc(start).getTime(); t <= utc(end).getTime(); t += DAY_MS) {
+    days.push(iso(new Date(t)));
+  }
+  return { start, end, days };
+};
+
 /**
  * The calendar span a report date covers.
  *
@@ -89,21 +98,13 @@ const daysInMonth = (year: number, month: number): number =>
  * rather than something to guess about.
  */
 export const periodSpan = (frequency: Frequency, reportDate: string): PeriodSpan | undefined => {
-  const span = (start: string, end: string): PeriodSpan => {
-    const days: string[] = [];
-    for (let t = utc(start).getTime(); t <= utc(end).getTime(); t += DAY_MS) {
-      days.push(iso(new Date(t)));
-    }
-    return { start, end, days };
-  };
-
   if (frequency === "DAILY") {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) return undefined;
-    return span(reportDate, reportDate);
+    return spanBetween(reportDate, reportDate);
   }
   if (frequency === "WEEKLY") {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) return undefined;
-    return span(iso(new Date(utc(reportDate).getTime() - 6 * DAY_MS)), reportDate);
+    return spanBetween(iso(new Date(utc(reportDate).getTime() - 6 * DAY_MS)), reportDate);
   }
   if (frequency === "MONTHLY") {
     const match = /^(\d{4})-(\d{2})$/.exec(reportDate);
@@ -112,10 +113,10 @@ export const periodSpan = (frequency: Frequency, reportDate: string): PeriodSpan
     const month = Number(match[2]);
     if (month < 1 || month > 12) return undefined;
     const last = String(daysInMonth(year, month)).padStart(2, "0");
-    return span(`${reportDate}-01`, `${reportDate}-${last}`);
+    return spanBetween(`${reportDate}-01`, `${reportDate}-${last}`);
   }
   if (!/^\d{4}$/.test(reportDate)) return undefined;
-  return span(`${reportDate}-01-01`, `${reportDate}-12-31`);
+  return spanBetween(`${reportDate}-01-01`, `${reportDate}-12-31`);
 };
 
 /**
