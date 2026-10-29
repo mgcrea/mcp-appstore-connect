@@ -275,7 +275,7 @@ export const registerVersionTools = (
         // summarizeResponse drops — hence the hand-built shape, shared with the
         // portfolio rollup so its three edge cases have one implementation.
         versionOfResponse(
-          await client.get(`/v1/appStoreVersions/${versionId}`, { include: "build" }),
+          await client.get(`/v1/appStoreVersions/${versionId}`, { include: "build,app" }),
         ),
       ),
   );

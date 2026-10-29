@@ -78,6 +78,21 @@ describe("get_version", () => {
     });
   });
 
+  it("asks for the app relationship, which Apple omits unless included", async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      const response = body(true) as { data: { relationships: Record<string, unknown> } };
+      const include = new URL(url).searchParams.get("include") ?? "";
+      if (!include.split(",").includes("app")) delete response.data.relationships.app;
+      return jsonResponse(response);
+    });
+
+    const result = await callTool(fetchImpl);
+
+    expect(JSON.parse((result.content as { text: string }[])[0]?.text ?? "{}").appId).toBe(
+      "6763524532",
+    );
+  });
+
   it("reports a version with no build attached as null rather than omitting it", async () => {
     const result = await callTool(vi.fn(async () => jsonResponse(body(false))));
 
