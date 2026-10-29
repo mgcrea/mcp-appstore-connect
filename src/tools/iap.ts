@@ -319,10 +319,15 @@ export const registerIapTools = (
           `/v1/inAppPurchaseAvailabilities/${availabilityId}/availableTerritories`,
           compact({ limit }),
         );
+        // One page of a relationship that is ~175 long when "everywhere", so say
+        // when it is cut short rather than let a missing territory read as absent.
+        const { incomplete, links } = summarizeResponse(territories) as Record<string, unknown>;
         return {
           id: availabilityId,
           ...attributesOf(availability),
           availableTerritories: resourcesOf(territories).map((t) => t.id),
+          ...(incomplete !== undefined ? { incomplete } : {}),
+          ...(links !== undefined ? { links } : {}),
         };
       }),
   );

@@ -522,6 +522,28 @@ describe("in-app purchase availability", () => {
     expect(text).toContain("never been set");
   });
 
+  it("says when the territory list is one page of several", async () => {
+    // "Everywhere" is ~175 territories, so the default limit of 50 cuts it short.
+    const fetchImpl = vi.fn(async (url: string) =>
+      String(url).includes("/availableTerritories")
+        ? jsonResponse({
+            data: [{ id: "USA", type: "territories" }],
+            meta: { paging: { total: 175, limit: 1 } },
+            links: { next: "https://api.appstoreconnect.apple.com/next" },
+          })
+        : jsonResponse({ data: { id: "avail-1", type: "inAppPurchaseAvailabilities" } }),
+    );
+
+    const result = await callTool(
+      "app_store_connect_get_iap_availability",
+      { inAppPurchaseId: IAP_ID, limit: 1 },
+      fetchImpl,
+    );
+
+    const body = payloadOf(result) as { incomplete?: { missing: number } };
+    expect(body.incomplete?.missing).toBe(174);
+  });
+
   it("refuses to make an IAP available nowhere", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ data: [] }));
 
