@@ -137,10 +137,20 @@ describe("set_version_build", () => {
   });
 
   /** Route by URL: the happy path is two preflight GETs then the PATCH. */
+  // Apple omits the app relationship unless the request asks for include=app,
+  // so the fixture does too — returning it unconditionally hid a skipped check.
+  const asApple = (url: string, body: unknown): unknown => {
+    const include = new URL(url).searchParams.get("include") ?? "";
+    if (include.split(",").includes("app")) return body;
+    const { data, ...rest } = body as { data: { relationships?: Record<string, unknown> } };
+    const { app: _app, ...relationships } = data.relationships ?? {};
+    return { ...rest, data: { ...data, relationships } };
+  };
+
   const routed = (version: unknown, build: unknown): ReturnType<typeof vi.fn> =>
     vi.fn(async (url: string) => {
-      if (url.includes("/v1/builds/")) return jsonResponse(build);
-      if (url.includes("/appStoreVersions/")) return jsonResponse(version);
+      if (url.includes("/v1/builds/")) return jsonResponse(asApple(url, build));
+      if (url.includes("/appStoreVersions/")) return jsonResponse(asApple(url, version));
       return jsonResponse({ data: {} });
     });
 
@@ -180,7 +190,9 @@ describe("set_version_build", () => {
     await callTool({ versionId: VERSION_ID, buildId: BUILD_ID }, fetchImpl);
 
     const buildCall = fetchImpl.mock.calls.find((call) => String(call[0]).includes("/v1/builds/"));
-    expect(new URL(String(buildCall?.[0])).searchParams.get("include")).toBe("preReleaseVersion");
+    expect(new URL(String(buildCall?.[0])).searchParams.get("include")?.split(",")).toContain(
+      "preReleaseVersion",
+    );
   });
 
   it("detaches with a null relationship and never reads a build", async () => {

@@ -482,7 +482,9 @@ export const registerVersionTools = (
           );
         }
 
-        const version = await client.get(`/v1/appStoreVersions/${versionId}`);
+        // include=app on both reads: Apple omits the relationship otherwise, and
+        // the cross-app check below would silently never run.
+        const version = await client.get(`/v1/appStoreVersions/${versionId}`, { include: "app" });
         if (buildId === undefined) {
           // Nothing to validate about a build we're removing — only that the
           // version still accepts the change.
@@ -490,7 +492,7 @@ export const registerVersionTools = (
         } else {
           assertAttachable(
             version,
-            await client.get(`/v1/builds/${buildId}`, { include: "preReleaseVersion" }),
+            await client.get(`/v1/builds/${buildId}`, { include: "preReleaseVersion,app" }),
           );
         }
 
