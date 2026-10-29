@@ -12,6 +12,7 @@ import {
   type ProbedPeriod,
   stepDown,
 } from "#/reports/period";
+import { contentLineCount } from "#/reports/tsv";
 
 /**
  * Apple reports "this period has no rows" as an HTTP 404, so a quiet month and a
@@ -72,12 +73,7 @@ const emptyNote = (period: string): string =>
   `activity and a period it has not assembled yet, so the reason below says which — read it ` +
   `before recording a zero.`;
 /** Data rows in a downloaded report, by the same trailing-newline rule as previewReport. */
-const dataRowCount = (tsv: string): number => {
-  const lines = tsv.split("\n");
-  let count = lines.length;
-  while (count > 0 && lines[count - 1] === "") count -= 1;
-  return Math.max(0, count - 1);
-};
+const dataRowCount = (tsv: string): number => Math.max(0, contentLineCount(tsv.split("\n")) - 1);
 
 /** Raised when Apple rejects the probe's parameters, so no verdict is claimed from it. */
 class ProbeUnsupported extends Error {}
