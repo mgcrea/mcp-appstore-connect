@@ -209,6 +209,43 @@ describe("export_listing", () => {
     expect(doc.version.appStoreState).toBe("PREPARE_FOR_SUBMISSION");
   });
 
+  // Every pre-release state, not only the ones that existed when the list was
+  // written: INVALID_BINARY is editable, READY_FOR_REVIEW is where a dry run leaves it.
+  it.each([
+    "INVALID_BINARY",
+    "READY_FOR_REVIEW",
+    "WAITING_FOR_EXPORT_COMPLIANCE",
+    "ACCEPTED",
+    "PROCESSING_FOR_APP_STORE",
+    "PENDING_APPLE_RELEASE",
+  ])("resolves 'latest' to a %s version over the shipped one", async (appStoreState) => {
+    const client = await connect(
+      routes(
+        exportRoutes({
+          "/v1/apps/1234567890/appStoreVersions": {
+            data: [
+              resource("v-live", "appStoreVersions", {
+                versionString: "1.3.0",
+                platform: "IOS",
+                appStoreState: "READY_FOR_SALE",
+              }),
+              resource("v-edit", "appStoreVersions", {
+                versionString: "1.4.0",
+                platform: "IOS",
+                appStoreState,
+              }),
+            ],
+          },
+        }),
+      ),
+    );
+    const result = await client.callTool({
+      name: "app_store_connect_export_listing",
+      arguments: { appId: "1234567890", format: "json" },
+    });
+    expect((JSON.parse(text(result)) as { version: { id: string } }).version.id).toBe("v-edit");
+  });
+
   it("resolves 'live' to the shipped version", async () => {
     const client = await connect(routes(exportRoutes()));
     const result = await client.callTool({
