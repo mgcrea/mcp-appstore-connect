@@ -669,6 +669,24 @@ describe("get_analytics_report", () => {
     expect(body.selection.alternatives).toContain("App Store Purchases");
   });
 
+  // Apple's own spelling, singular, and listed after "Shortcut App Usage" — the
+  // order the live APP_USAGE list comes back in.
+  it("picks installs and deletions for APP_USAGE", async () => {
+    const fetchImpl = walk({
+      reports: [
+        report("r1", "Shortcut App Usage", "APP_USAGE"),
+        report("r2", "App Store Installation and Deletion Standard", "APP_USAGE"),
+      ],
+      instances: { r1: [instance("i1")], r2: [instance("i2")] },
+    });
+
+    const body = payloadOf(await call(fetchImpl, { category: "APP_USAGE" })) as {
+      selection: { reportName: string };
+    };
+
+    expect(body.selection.reportName).toBe("App Store Installation and Deletion Standard");
+  });
+
   it("refuses a reportName that does not exist rather than guessing", async () => {
     const fetchImpl = walk({
       reports: [report("r1", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT")],

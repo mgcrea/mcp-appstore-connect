@@ -165,7 +165,7 @@ export const walkAnalytics = async (
 export const PREFERRED_REPORT: Record<string, string> = {
   APP_STORE_ENGAGEMENT: "App Store Discovery and Engagement",
   COMMERCE: "App Store Downloads",
-  APP_USAGE: "App Store Installations and Deletions",
+  APP_USAGE: "App Store Installation and Deletion",
 };
 /** Apple names the richer variant by suffix; Standard is the one without it. */
 export const isDetailed = (name: string): boolean => /detailed/i.test(name);

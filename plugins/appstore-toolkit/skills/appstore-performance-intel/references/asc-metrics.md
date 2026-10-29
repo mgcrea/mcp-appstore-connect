@@ -24,14 +24,14 @@ takes. Each has a Standard and a Detailed variant; Detailed adds `Source Info`,
 `Page Title` and `Campaign`, and is what you need to attribute anything to a
 specific referrer or campaign token.
 
-| Report                                | Category               | Holds                                                                               |
-| ------------------------------------- | ---------------------- | ----------------------------------------------------------------------------------- |
-| App Store Discovery and Engagement    | `APP_STORE_ENGAGEMENT` | impressions and product page views, by source and page type — the top of the funnel |
-| App Store Downloads                   | `COMMERCE`             | downloads split by first-time / redownload / update, attributed to source           |
-| App Store Purchases                   | `COMMERCE`             | paid app and IAP revenue, attributed to download source and page type               |
-| App Store Installations and Deletions | `APP_USAGE`            | installs and deletions per device, with `App Download Date` for cohorting           |
-| App Sessions                          | `APP_USAGE`            | how often people open the app and for how long                                      |
-| App Store Pre-Order                   | `COMMERCE`             | pre-orders, only relevant around a launch                                           |
+| Report                              | Category               | Holds                                                                               |
+| ----------------------------------- | ---------------------- | ----------------------------------------------------------------------------------- |
+| App Store Discovery and Engagement  | `APP_STORE_ENGAGEMENT` | impressions and product page views, by source and page type — the top of the funnel |
+| App Store Downloads                 | `COMMERCE`             | downloads split by first-time / redownload / update, attributed to source           |
+| App Store Purchases                 | `COMMERCE`             | paid app and IAP revenue, attributed to download source and page type               |
+| App Store Installation and Deletion | `APP_USAGE`            | installs and deletions per device, with `App Download Date` for cohorting           |
+| App Sessions                        | `APP_USAGE`            | how often people open the app and for how long                                      |
+| App Store Pre-Order                 | `COMMERCE`             | pre-orders, only relevant around a launch                                           |
 
 **The delimiter is not fixed.** Analytics segments have been observed both
 comma- and tab-delimited — the same account's engagement segment arrives with
