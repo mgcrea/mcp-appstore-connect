@@ -16,6 +16,17 @@ import {
 } from "../helpers.js";
 
 describe("reports require a vendor number", () => {
+  // The empty-period verdicts are statements about how long ago a period ended,
+  // and the probe tests ask about March 2026: on the real clock they fall past
+  // Apple's 365-day retention and flip to BEYOND_RETENTION. Only Date is faked.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-11T09:00:00Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("fails clearly when neither config nor argument supplies one", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ data: [] }));
     const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
