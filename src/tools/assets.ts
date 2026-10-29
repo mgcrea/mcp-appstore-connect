@@ -2,6 +2,8 @@ import { readFile, stat } from "node:fs/promises";
 import { basename, isAbsolute } from "node:path";
 
 import type { AppStoreConnectClient } from "#/client/asc";
+import { sleep } from "#/client/http";
+import { isRecord, type Rec } from "#/client/shape";
 
 // Apple uploads every binary asset the same way — reserve, PUT the bytes to a
 // pre-signed URL, commit a checksum, then poll while validation runs
@@ -17,14 +19,6 @@ export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export const MAX_VIDEO_BYTES = 500 * 1024 * 1024;
 
 const POLL_INTERVALS_MS = [1000, 2000, 2000, 3000, 5000];
-
-export const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
-
-export type Rec = Record<string, unknown>;
-
-export const isRecord = (value: unknown): value is Rec =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 export const attributesOf = (response: unknown): Rec => {
   if (!isRecord(response) || !isRecord(response.data)) return {};

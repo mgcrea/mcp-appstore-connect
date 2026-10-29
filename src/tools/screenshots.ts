@@ -4,11 +4,10 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 import type { AppStoreConnectClient, UploadOperation } from "#/client/asc";
-import { summarizeResponse } from "#/client/shape";
+import { isRecord, summarizeResponse } from "#/client/shape";
 import {
   attributesOf,
   idOf,
-  isRecord,
   pollAssetState,
   readImage,
   stripUploadOperations,
