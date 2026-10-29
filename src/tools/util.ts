@@ -242,7 +242,6 @@ export const appIdsArg = z
  */
 export const summarizeWithApp = (
   response: unknown,
-  limit: number,
   appIds: string | string[],
 ): Record<string, unknown> => {
   const rows = resourcesOf(response).map((res) => ({

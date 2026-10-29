@@ -50,7 +50,6 @@ export const registerTestflightTools = (
             // it several apps' groups are indistinguishable.
             compact({ "filter[app]": appId, include: "app", limit }),
           ),
-          limit,
           appId,
         ),
       ),

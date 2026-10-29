@@ -63,7 +63,6 @@ export const registerBuildTools = (
               limit,
             }),
           ),
-          limit,
           appId,
         ),
       ),
