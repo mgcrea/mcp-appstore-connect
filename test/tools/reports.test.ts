@@ -562,10 +562,35 @@ describe("download_finance_report", () => {
         name: "app_store_connect_download_finance_report",
         arguments: { reportDate: "2026-07", regionCode: "ZZ", vendorNumber: VENDOR },
       }),
-    ) as { reason: string };
+    ) as { reason: string; evidence: Record<string, unknown> };
 
     expect(body.reason).toBe("NO_ROWS_OBSERVED");
     expect(fetchImpl.mock.calls).toHaveLength(1);
+    expect(body.evidence.requests).toBe(1);
+  });
+
+  // A ZZ that failed measured nothing, so it must not read as "0 rows anywhere".
+  it("does not report a failed ZZ probe as an empty account", async () => {
+    const fetchImpl = vi.fn(async (url: string) =>
+      new URL(String(url)).searchParams.get("filter[regionCode]") === "ZZ"
+        ? new Response(JSON.stringify({ errors: [] }), { status: 500 })
+        : new Response(JSON.stringify({ errors: [] }), { status: 404 }),
+    );
+    const client = await connect(
+      { ...baseConfig, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_download_finance_report",
+        arguments: { reportDate: "2026-07", regionCode: "US", vendorNumber: VENDOR },
+      }),
+    ) as { reason: string; evidence: Record<string, unknown> };
+
+    expect(body.reason).toBe("NO_ROWS_OBSERVED");
+    expect(body.evidence.rowsInAllRegions).toBeUndefined();
+    expect(body.evidence.probeError).toBeDefined();
   });
 });
 

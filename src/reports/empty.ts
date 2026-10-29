@@ -262,7 +262,10 @@ export const emptyFinancePeriod = async (
   // The one thing finance can actually establish. ZZ covers every region, so
   // rows there prove the account was not quiet and this region was — a
   // distinction the prose could only suggest.
-  if (probe !== undefined && regionCode.toUpperCase() !== "ZZ") {
+  const probing = probe !== undefined && regionCode.toUpperCase() !== "ZZ";
+  // Set when ZZ failed for any reason but its own 404, which then measured nothing.
+  let probeError: string | undefined;
+  if (probing) {
     try {
       const tsv = await probe.client.downloadReport("/v1/financeReports", {
         "filter[regionCode]": "ZZ",
@@ -282,9 +285,13 @@ export const emptyFinancePeriod = async (
             `for the account total.`,
         };
       }
-    } catch {
+    } catch (err) {
       // ZZ failing too tells us nothing extra; fall through to the honest
       // "undetermined" rather than reading one failure as evidence about another.
+      // A 404 is ZZ's own "no rows", so only that one still counts as a zero.
+      if (!(err instanceof AppStoreConnectApiError && err.status === 404)) {
+        probeError = err instanceof Error ? err.message : String(err);
+      }
     }
   }
 
@@ -297,10 +304,12 @@ export const emptyFinancePeriod = async (
     reason: "NO_ROWS_OBSERVED",
     confidence: "bounded",
     evidence: {
-      ...(probe !== undefined && regionCode.toUpperCase() !== "ZZ"
-        ? { probedRegion: "ZZ", rowsInAllRegions: 0 }
+      ...(probing
+        ? probeError === undefined
+          ? { probedRegion: "ZZ", rowsInAllRegions: 0 }
+          : { probedRegion: "ZZ", probeError }
         : {}),
-      requests: probe === undefined ? 1 : 2,
+      requests: probing ? 2 : 1,
     },
     remedy: FINANCE_EMPTY_REMEDY,
   };
