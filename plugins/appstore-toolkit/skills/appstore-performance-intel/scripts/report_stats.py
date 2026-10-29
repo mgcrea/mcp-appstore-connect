@@ -1234,6 +1234,8 @@ def cmd_compare(args):
     cur_rows, cur_cols, cur_trunc, cur_note, cur_src = read_report(args.current)
     guard_truncation(args.base, base_trunc, base_note, args.allow_truncated)
     guard_truncation(args.current, cur_trunc, cur_note, args.allow_truncated)
+    warn_duplicates(args.base, base_rows)
+    warn_duplicates(args.current, cur_rows)
 
     # The same filter is applied to both sides on purpose: comparing one app's
     # month against the whole account's month is the kind of mistake that

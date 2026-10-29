@@ -10,6 +10,8 @@ re-introducing.
 Run: python3 -m unittest discover -s <this directory>
 """
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -18,7 +20,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from report_stats import ReportError, guard_truncation, read_report  # noqa: E402
+from report_stats import ReportError, guard_truncation, main, read_report  # noqa: E402
 
 HEADER = "Date,Units"
 FULL = "\n".join([HEADER] + ["2026-06-%02d,10" % d for d in range(1, 11)]) + "\n"
@@ -182,6 +184,29 @@ class EmptyPeriodTest(unittest.TestCase):
         with self.assertRaises(ReportError) as ctx:
             read_report(path)
         self.assertNotIn("no 'report' key", str(ctx.exception))
+
+
+class DuplicateWarningTest(unittest.TestCase):
+    """The module promises every command warns about doubled rows, because a
+    doubled file totals exactly wrong while looking well-formed."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="report-stats-dup-")
+
+    def write(self, name, text):
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def test_compare_warns_about_a_doubled_file(self):
+        base = self.write("base.csv", "Territory,Units\nUSA,3000\nFRA,100\n")
+        doubled = self.write("dup.csv", "Territory,Units\nUSA,3000\nUSA,3000\nFRA,100\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["compare", base, doubled, "--by", "Territory", "--metric", "Units"])
+        self.assertEqual(code, 0)
+        self.assertIn("exact duplicate", out.getvalue())
 
 
 if __name__ == "__main__":
