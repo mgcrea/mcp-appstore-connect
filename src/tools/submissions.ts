@@ -149,6 +149,9 @@ const summarizeSubmissions = (
 ): unknown => {
   const sideloaded = includedIndex(response, "reviewSubmissionItems");
   return {
+    // The paging verdict (`incomplete`, `meta`, `links.next`) comes from
+    // summarizeResponse, so a capped list is never read as the whole one.
+    ...(summarizeResponse(response) as Record<string, unknown>),
     data: resourcesOf(response).map((res) => {
       const items =
         details.get(String(res.id)) ??

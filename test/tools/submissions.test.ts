@@ -846,6 +846,28 @@ describe("review submission items", () => {
     expect(body.data[0]?.items).toEqual([{ id: "i1", state: "REJECTED" }]);
     expect(body.note).toContain("sub-1");
   });
+
+  it("says when the page is not the whole list", async () => {
+    const next = "https://api.appstoreconnect.apple.com/v1/reviewSubmissions?cursor=Mg";
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        data: [submission("sub-1", "COMPLETE", []), submission("sub-2", "COMPLETE", [])],
+        meta: { paging: { total: 5, limit: 2 } },
+        links: { next },
+      }),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_review_submissions",
+        arguments: { appId: "1", limit: 2 },
+      }),
+    ) as { incomplete?: { missing: number }; links?: { next: string } };
+
+    expect(body.incomplete?.missing).toBe(3);
+    expect(body.links?.next).toBe(next);
+  });
 });
 
 describe("submission prerequisites", () => {
