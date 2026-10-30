@@ -799,6 +799,15 @@ LIVE_KEY_ALIASES = {
 
 def unwrap_live_fields(blob, locale=None):
     """The live fields inside whatever shape --live-fields was handed."""
+    # export_listing --format json: the fields sit per locale, under the same
+    # camelCase keys the API uses. Read --locale's, else the app's primary.
+    if isinstance(blob, dict) and isinstance(blob.get("locales"), dict) and "schemaVersion" in blob:
+        locales = blob["locales"]
+        primary = (blob.get("app") or {}).get("primaryLocale")
+        chosen = next((l for l in (locale, primary) if l in locales), None)
+        if chosen is None:
+            chosen = next(iter(locales), None)
+        return locales.get(chosen, {}) if chosen is not None else {}
     # Tolerate a raw API response: {"data":[{"attributes":{...}}]}
     if isinstance(blob, dict) and "data" in blob:
         data = blob["data"]

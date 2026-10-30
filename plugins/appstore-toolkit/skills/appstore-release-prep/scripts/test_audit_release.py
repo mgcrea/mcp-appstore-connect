@@ -64,5 +64,32 @@ class ReleaseBoundaryTest(unittest.TestCase):
         self.assertEqual(subjects, ["feat: share sheet"])
 
 
+class LiveFieldsTest(unittest.TestCase):
+    """SKILL.md says --live-fields takes export_listing's JSON document, whose
+    fields sit under locales[<locale>], not at the top level."""
+
+    DOC = {
+        "schemaVersion": 1,
+        "app": {"id": "1", "primaryLocale": "en-US"},
+        "version": {"id": "v"},
+        "appInfo": {"id": "a"},
+        "locales": {
+            "en-US": {"description": "English.", "subtitle": "Sub"},
+            "fr-FR": {"description": "Français.", "subtitle": "Sous"},
+        },
+        "baseline": {},
+    }
+
+    def test_reads_the_primary_locale_of_an_export_listing_document(self):
+        self.assertEqual(unwrap_live_fields(self.DOC), {"description": "English.", "subtitle": "Sub"})
+
+    def test_reads_the_asked_for_locale(self):
+        self.assertEqual(unwrap_live_fields(self.DOC, "fr-FR")["subtitle"], "Sous")
+
+    def test_still_reads_a_raw_api_response(self):
+        raw = {"data": [{"attributes": {"description": "Raw."}}]}
+        self.assertEqual(unwrap_live_fields(raw), {"description": "Raw."})
+
+
 if __name__ == "__main__":
     unittest.main()
