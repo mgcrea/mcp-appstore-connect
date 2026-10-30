@@ -309,5 +309,36 @@ class RateZeroPeriodTest(unittest.TestCase):
         self.assertEqual(code, 2)
 
 
+class RatioNumeratorTest(unittest.TestCase):
+    """A numerator value that matches no row is a typo, not a 0% rate."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="report-stats-ratio-")
+
+    def run_ratio(self, body, numerator):
+        path = os.path.join(self.dir, "r.csv")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("Event,Territory,Counts\n" + body)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main([
+                "ratio", path, "--numerator", numerator, "--denominator", "Event=Impression",
+                "--by", "Territory", "--metric", "Counts",
+            ])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_refuses_a_numerator_that_matches_nothing(self):
+        body = "Impression,US,3000\nImpression,FR,900\nPage view,US,90\n"
+        code, _out, err = self.run_ratio(body, "Event=Page View")
+        self.assertEqual(code, 2)
+        self.assertIn("Page view", err)
+
+    def test_two_zero_rates_are_not_a_factor_of_infinity(self):
+        body = "Impression,US,3000\nImpression,FR,900\nPage view,US,0\nPage view,FR,0\n"
+        code, out, _err = self.run_ratio(body, "Event=Page view")
+        self.assertEqual(code, 0)
+        self.assertNotIn("infinity", out)
+
+
 if __name__ == "__main__":
     unittest.main()

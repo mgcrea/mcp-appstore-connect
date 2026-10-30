@@ -1145,7 +1145,29 @@ def cmd_ratio(args):
                 "den_by": _grouped(den_rows, by, metric),
                 "filters": filter_lines,
                 "span": date_span(rows),
+                "num_matched": len(num_rows),
+                "values": {
+                    clause.partition("=")[0].strip(): sorted(
+                        {str(r.get(clause.partition("=")[0].strip(), "")).strip() for r in rows}
+                    )
+                    for clause in args.numerator
+                },
             }
+        )
+
+    # A numerator that matches no row in any file is a misspelled value, not a
+    # 0% rate: apply_where only catches a misspelled column. One period with no
+    # rows can be a real zero (Apple emits no row for nothing), so only none
+    # anywhere is refused.
+    if not any(period["num_matched"] for period in periods):
+        seen = "; ".join(
+            "%s has %s" % (col, ", ".join(repr(v) for v in values))
+            for col, values in periods[0]["values"].items()
+        )
+        raise ReportError(
+            "No row matches the numerator (%s) in %s, so this would print a 0%% rate "
+            "for a value that is not there. Check the spelling: %s."
+            % (" ".join(args.numerator), " or ".join(p["path"] for p in periods), seen)
         )
 
     by = periods[0]["by"]
@@ -1202,6 +1224,10 @@ def cmd_ratio(args):
             rest_rate = rest_num / rest_den
             if top_rate and rest_rate:
                 factor = max(top_rate, rest_rate) / min(top_rate, rest_rate)
+            elif top_rate == rest_rate:
+                # Both zero: nothing converts anywhere, so neither side is unlike
+                # the other.
+                factor = 1.0
             else:
                 factor = float("inf")
             if factor >= 2.0:
