@@ -1,16 +1,15 @@
-import { createHash } from "node:crypto";
-
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
-import type { AppStoreConnectClient, UploadOperation } from "#/client/asc";
+import type { AppStoreConnectClient } from "#/client/asc";
 import { isRecord, summarizeResponse } from "#/client/shape";
 import {
-  attributesOf,
+  commitAsset,
   idOf,
   pollAssetState,
   readImage,
   stripUploadOperations,
+  uploadOperationsOf,
 } from "#/tools/assets";
 import { compact, confirmArg, limitArg, savePathArg, wrap, wrapSaved } from "#/tools/util";
 
@@ -157,31 +156,10 @@ const uploadScreenshot = async (
   });
   const screenshotId = idOf(reserved);
   if (!screenshotId) throw new Error("Reserving the screenshot returned no id.");
-  const attrs = attributesOf(reserved);
-  const operations = (
-    Array.isArray(attrs.uploadOperations) ? attrs.uploadOperations : []
-  ) as UploadOperation[];
+  const operations = uploadOperationsOf(reserved);
 
-  try {
-    // 3. PUT the raw bytes to Apple's blob store, then 4. commit the checksum.
-    await client.uploadAsset(operations, bytes);
-    await client.patch(`/v1/appScreenshots/${screenshotId}`, {
-      data: {
-        type: "appScreenshots",
-        id: screenshotId,
-        attributes: {
-          uploaded: true,
-          sourceFileChecksum: createHash("md5").update(bytes).digest("hex"),
-        },
-      },
-    });
-  } catch (err) {
-    // A reservation that was never committed is invisible in the App Store
-    // Connect UI but still blocks the version from being submitted, and it
-    // carries no diagnostic value — so clean it up, best effort.
-    await client.del(`/v1/appScreenshots/${screenshotId}`).catch(() => undefined);
-    throw err;
-  }
+  // 3. PUT the raw bytes to Apple's blob store, then 4. commit the checksum.
+  await commitAsset(client, "appScreenshots", screenshotId, operations, bytes);
 
   // 5. Wait for Apple's asynchronous validation to land.
   return pollAssetState(client, {

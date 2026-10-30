@@ -1,18 +1,18 @@
-import { createHash } from "node:crypto";
 import { extname } from "node:path";
 
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
-import type { AppStoreConnectClient, UploadOperation } from "#/client/asc";
+import type { AppStoreConnectClient } from "#/client/asc";
 import { isRecord, summarizeResponse } from "#/client/shape";
 import {
-  attributesOf,
+  commitAsset,
   idOf,
   MAX_VIDEO_BYTES,
   pollAssetState,
   readAsset,
   stripUploadOperations,
+  uploadOperationsOf,
 } from "#/tools/assets";
 import { compact, confirmArg, limitArg, savePathArg, wrap, wrapSaved } from "#/tools/util";
 
@@ -167,29 +167,9 @@ const uploadPreview = async (client: AppStoreConnectClient, args: UploadArgs): P
   });
   const previewId = idOf(reserved);
   if (!previewId) throw new Error("Reserving the app preview returned no id.");
-  const attrs = attributesOf(reserved);
-  const operations = (
-    Array.isArray(attrs.uploadOperations) ? attrs.uploadOperations : []
-  ) as UploadOperation[];
+  const operations = uploadOperationsOf(reserved);
 
-  try {
-    await client.uploadAsset(operations, bytes);
-    await client.patch(`/v1/appPreviews/${previewId}`, {
-      data: {
-        type: "appPreviews",
-        id: previewId,
-        attributes: {
-          uploaded: true,
-          sourceFileChecksum: createHash("md5").update(bytes).digest("hex"),
-        },
-      },
-    });
-  } catch (err) {
-    // Same reasoning as a screenshot: an uncommitted reservation is invisible
-    // in the UI but still blocks submission.
-    await client.del(`/v1/appPreviews/${previewId}`).catch(() => undefined);
-    throw err;
-  }
+  await commitAsset(client, "appPreviews", previewId, operations, bytes);
 
   const result = await pollAssetState(client, {
     resourcePath: "/v1/appPreviews",

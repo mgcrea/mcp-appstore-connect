@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { basename, isAbsolute } from "node:path";
 
-import type { AppStoreConnectClient } from "#/client/asc";
+import type { AppStoreConnectClient, UploadOperation } from "#/client/asc";
 import { sleep } from "#/client/http";
 import { isRecord, type Rec } from "#/client/shape";
 
@@ -28,6 +29,45 @@ export const attributesOf = (response: unknown): Rec => {
 export const idOf = (response: unknown): string | undefined => {
   if (!isRecord(response) || !isRecord(response.data)) return undefined;
   return typeof response.data.id === "string" ? response.data.id : undefined;
+};
+
+/** The upload operations Apple returned on a reservation, or none. */
+export const uploadOperationsOf = (reserved: unknown): UploadOperation[] => {
+  const ops = attributesOf(reserved).uploadOperations;
+  return (Array.isArray(ops) ? ops : []) as UploadOperation[];
+};
+
+/**
+ * PUT the bytes to Apple's blob store, then commit their checksum: the middle
+ * of every asset upload, for any `resourceType` (appScreenshots, appPreviews…).
+ *
+ * A reservation that was never committed is invisible in the App Store Connect
+ * UI but still blocks the version from being submitted, and it carries no
+ * diagnostic value, so a failure deletes it, best effort, before rethrowing.
+ */
+export const commitAsset = async (
+  client: AppStoreConnectClient,
+  resourceType: string,
+  assetId: string,
+  operations: UploadOperation[],
+  bytes: Uint8Array,
+): Promise<void> => {
+  try {
+    await client.uploadAsset(operations, bytes);
+    await client.patch(`/v1/${resourceType}/${assetId}`, {
+      data: {
+        type: resourceType,
+        id: assetId,
+        attributes: {
+          uploaded: true,
+          sourceFileChecksum: createHash("md5").update(bytes).digest("hex"),
+        },
+      },
+    });
+  } catch (err) {
+    await client.del(`/v1/${resourceType}/${assetId}`).catch(() => undefined);
+    throw err;
+  }
 };
 
 export type ReadAssetOptions = {

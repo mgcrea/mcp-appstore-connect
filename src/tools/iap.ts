@@ -1,9 +1,7 @@
-import { createHash } from "node:crypto";
-
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
-import type { AppStoreConnectClient, UploadOperation } from "#/client/asc";
+import type { AppStoreConnectClient } from "#/client/asc";
 import {
   attributesOf,
   type Rec,
@@ -12,16 +10,7 @@ import {
   resourcesOf,
   summarizeResponse,
 } from "#/client/shape";
-// `attributesOf` exists in both modules and they are NOT interchangeable: the
-// one from shape.js takes a resource, this one takes the whole response
-// envelope. Aliased rather than imported bare so the two cannot be swapped by a
-// tidy-up.
-import {
-  attributesOf as envelopeAttributes,
-  idOf,
-  pollAssetState,
-  readImage,
-} from "#/tools/assets";
+import { commitAsset, idOf, pollAssetState, readImage, uploadOperationsOf } from "#/tools/assets";
 import { MANUAL_PRICE_LIMIT, manualPriceNote, manualPriceRows } from "#/tools/pricing";
 import {
   appIdArg,
@@ -731,31 +720,15 @@ export const registerIapTools = (
         });
         const screenshotId = idOf(reserved);
         if (!screenshotId) throw new Error("Reserving the review screenshot returned no id.");
-        const operations = (() => {
-          const ops = envelopeAttributes(reserved).uploadOperations;
-          return (Array.isArray(ops) ? ops : []) as UploadOperation[];
-        })();
+        const operations = uploadOperationsOf(reserved);
 
-        try {
-          await client.uploadAsset(operations, bytes);
-          await client.patch(`/v1/inAppPurchaseAppStoreReviewScreenshots/${screenshotId}`, {
-            data: {
-              type: "inAppPurchaseAppStoreReviewScreenshots",
-              id: screenshotId,
-              attributes: {
-                uploaded: true,
-                sourceFileChecksum: createHash("md5").update(bytes).digest("hex"),
-              },
-            },
-          });
-        } catch (err) {
-          // An uncommitted reservation is invisible in the App Store Connect UI
-          // but still blocks submission, and carries no diagnostic value.
-          await client
-            .del(`/v1/inAppPurchaseAppStoreReviewScreenshots/${screenshotId}`)
-            .catch(() => undefined);
-          throw err;
-        }
+        await commitAsset(
+          client,
+          "inAppPurchaseAppStoreReviewScreenshots",
+          screenshotId,
+          operations,
+          bytes,
+        );
 
         return pollAssetState(client, {
           resourcePath: "/v1/inAppPurchaseAppStoreReviewScreenshots",
