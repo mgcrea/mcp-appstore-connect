@@ -706,10 +706,18 @@ def cmd_money(args):
         key = (currency,) + tuple(
             str(row.get(col, "")).strip() or "(blank)" for col in by
         )
-        bucket = buckets.setdefault(key, {"units": 0.0, "spend": 0.0, "proceeds": 0.0})
+        bucket = buckets.setdefault(
+            key, {"units": 0.0, "spend": 0.0, "proceeds": 0.0, "spend_by": {}}
+        )
         bucket["units"] += units
         if have_price:
-            bucket["spend"] += units * (to_number(row.get(PER_UNIT_PRICE)) or 0.0)
+            spend = units * (to_number(row.get(PER_UNIT_PRICE)) or 0.0)
+            bucket["spend"] += spend
+            # Spend is in the CUSTOMER's currency, which need not be the bucket's
+            # proceeds currency, so it is kept apart per currency as well.
+            if CURRENCY_OF_PRICE in columns:
+                paid_in = str(row.get(CURRENCY_OF_PRICE, "")).strip() or "?"
+                bucket["spend_by"][paid_in] = bucket["spend_by"].get(paid_in, 0.0) + spend
         if have_proceeds:
             bucket["proceeds"] += units * (to_number(row.get(PER_UNIT_PROCEEDS)) or 0.0)
 
@@ -723,14 +731,23 @@ def cmd_money(args):
         headers.append("est. proceeds")
 
     ordered = sorted(buckets.items(), key=lambda kv: kv[1]["proceeds"] or kv[1]["units"], reverse=True)
+    hidden = len(ordered) - args.top if args.top and len(ordered) > args.top else 0
     if args.top:
         ordered = ordered[: args.top]
+
+    def spend_cell(currency, agg):
+        # One figure only when every customer paid in the bucket's own currency;
+        # otherwise each customer currency is shown apart, never summed.
+        paid = agg["spend_by"]
+        if not paid or set(paid) == {currency}:
+            return fmt(agg["spend"])
+        return " + ".join("%s %s" % (fmt(v), c) for c, v in sorted(paid.items()))
 
     pairs = []
     for key, agg in ordered:
         row = list(key) + [fmt(agg["units"])]
         if have_price:
-            row.append(fmt(agg["spend"]))
+            row.append(spend_cell(key[0], agg))
         if have_proceeds:
             row.append(fmt(agg["proceeds"]))
         pairs.append(row)
@@ -749,6 +766,8 @@ def cmd_money(args):
         "the authoritative figure for what you were actually paid.\n"
     )
     print(render_table(pairs, headers))
+    if hidden:
+        print("\n(%d more rows not shown -- raise --top, or 0 for all)" % hidden)
     # Units mixes new purchases with free updates and redownloads unless the
     # product type is pinned. That inflates "units" while leaving spend flat,
     # which reads as a collapsed price rather than as two different events.

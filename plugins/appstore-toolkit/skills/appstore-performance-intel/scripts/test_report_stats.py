@@ -243,5 +243,34 @@ class RateWindowTest(unittest.TestCase):
         self.assertNotIn("unlikely to be noise", out)
 
 
+class MoneyTest(unittest.TestCase):
+    HEADER = "Units,Customer Price,Customer Currency,Developer Proceeds,Currency of Proceeds,Country Code"
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="report-stats-money-")
+
+    def run_money(self, lines, *extra):
+        path = os.path.join(self.dir, "sales.csv")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join([self.HEADER] + lines) + "\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["money", path, *extra])
+        return code, out.getvalue()
+
+    def test_says_how_many_buckets_top_left_out(self):
+        lines = ["1,0.99,USD,0.70,USD,T%02d" % i for i in range(20)]
+        code, out = self.run_money(lines, "--by", "Country Code")
+        self.assertEqual(code, 0)
+        self.assertIn("5 more", out)
+
+    def test_never_adds_two_customer_currencies_together(self):
+        # Both rows pay out in USD, but one customer paid in tenge.
+        code, out = self.run_money(["1,4.99,USD,3.49,USD,US", "1,2490,KZT,3.49,USD,KZ"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("2,494.99", out)
+        self.assertIn("KZT", out)
+
+
 if __name__ == "__main__":
     unittest.main()
