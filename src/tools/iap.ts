@@ -64,9 +64,19 @@ const iapLocalizationIdArg = z
  */
 const IAP_FIELD_LIMITS = { name: 30, description: 45 } as const;
 
-const assertWithinLimits = (fields: { name?: string; description?: string }): void => {
-  for (const [field, limit] of Object.entries(IAP_FIELD_LIMITS)) {
-    const value = fields[field as keyof typeof IAP_FIELD_LIMITS];
+/**
+ * The IAP's own `name` is the internal reference name, which Apple allows 64
+ * characters (App Store Connect Help, "In-app purchase information"). The 30
+ * above is the customer-facing display name on a localization.
+ */
+const IAP_REFERENCE_LIMITS = { name: 64 } as const;
+
+const assertWithinLimits = (
+  fields: { name?: string; description?: string },
+  limits: { name: number; description?: number } = IAP_FIELD_LIMITS,
+): void => {
+  for (const [field, limit] of Object.entries(limits)) {
+    const value = fields[field as keyof typeof fields];
     if (value === undefined || value.length <= limit) continue;
     throw new PreconditionError(
       `The in-app purchase ${field} is ${value.length} characters, over Apple's ${limit}-character ` +
@@ -522,7 +532,7 @@ export const registerIapTools = (
           .string()
           .optional()
           .describe(
-            "Internal reference name shown in App Store Connect (30-char limit). Not " +
+            "Internal reference name shown in App Store Connect (64-char limit). Not " +
               "customer-facing.",
           ),
         reviewNote: z
@@ -545,7 +555,7 @@ export const registerIapTools = (
     },
     async ({ inAppPurchaseId, confirm: _confirm, ...attributes }) =>
       wrap(async () => {
-        assertWithinLimits(attributes);
+        assertWithinLimits(attributes, IAP_REFERENCE_LIMITS);
         return summarizeResponse(
           await client.patch(`/v2/inAppPurchases/${inAppPurchaseId}`, {
             data: {

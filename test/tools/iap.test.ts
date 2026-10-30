@@ -297,6 +297,29 @@ describe("in-app purchase metadata", () => {
     expect(body.data.attributes.confirm).toBeUndefined();
   });
 
+  // The reference name is internal and allows 64 characters; 30 is the
+  // customer-facing display name's limit, on the localization.
+  it("takes a reference name up to Apple's 64 characters, and refuses past it", async () => {
+    const accepted = okFetch({ data: { id: IAP_ID, type: "inAppPurchases" } });
+    const ok = await callTool(
+      "app_store_connect_update_in_app_purchase",
+      { inAppPurchaseId: IAP_ID, name: "x".repeat(64), confirm: true },
+      accepted,
+    );
+    expect(ok.isError).toBeFalsy();
+    expect(patchCall(accepted)).toBeDefined();
+
+    const refused = okFetch();
+    const tooLong = await callTool(
+      "app_store_connect_update_in_app_purchase",
+      { inAppPurchaseId: IAP_ID, name: "x".repeat(65), confirm: true },
+      refused,
+    );
+    expect(tooLong.isError).toBe(true);
+    expect((tooLong.content as { text: string }[])[0]?.text ?? "").toContain("64-character");
+    expect(patchCall(refused)).toBeUndefined();
+  });
+
   it("creates a localization through the inAppPurchaseV2 relationship", async () => {
     const fetchImpl = okFetch();
 
