@@ -46,6 +46,12 @@ jobs:
       # total, which is the thing the whole report envelope is built to prevent.
       - name: Skill scripts 🧪
         run: python3 -m unittest discover -s plugins/appstore-toolkit/skills/appstore-performance-intel/scripts -v
+      # The release audit decides which commits a release is about and where the
+      # store copy lives. Getting either wrong prints confident, ordinary output
+      # (last release's features as news, existing copy as missing), so it is
+      # pinned here rather than noticed in review.
+      - name: Release audit script 🧪
+        run: python3 -m unittest discover -s plugins/appstore-toolkit/skills/appstore-release-prep/scripts -v
       - name: Build 📦
         run: pnpm run build
       # Every client config in the wild spells this server `npx -y <package>`,

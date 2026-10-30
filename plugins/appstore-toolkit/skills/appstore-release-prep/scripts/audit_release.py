@@ -193,7 +193,8 @@ def parse_changelog(repo, path="CHANGELOG.md"):
             raw = m.group(2)
             dated = bool(raw and RELEASE_DATE.match(raw))
             versions.append({"version": m.group(1), "date": raw if dated else None,
-                             "label": None if dated else raw, "line": i})
+                             "label": None if dated else raw, "line": i,
+                             "heading": line.rstrip()})
     return {"exists": True, "path": path, "versions": versions}
 
 
@@ -207,17 +208,22 @@ def changelog_last_edit(repo, changelog):
     return sh(["git", "log", "-1", "--format=%H", "--", changelog], repo) or None
 
 
-def release_boundary(repo, changelog, version):
+def release_boundary(repo, changelog, version, heading=None):
     """Find the commit that introduced a version's changelog heading.
 
     That commit is the release boundary: everything at or before it shipped in
     that release, everything after it is unreleased. This matters because a
     feature can be merged long before the release commit and still ship in it --
     the merge date tells you nothing, the boundary does.
+
+    The full dated heading line is searched first. An entry started as
+    "## [1.4.0] - Unreleased" and dated at release keeps "## [1.4.0]" the whole
+    time, so the bare heading finds the commit that STARTED the entry, and every
+    feature written up under it would read as news for the next release.
     """
     if not version:
         return None
-    for pattern in (f"## [{version}]", f"## {version}"):
+    for pattern in filter(None, (heading, f"## [{version}]", f"## {version}")):
         out = sh(["git", "log", "--format=%H", "-S", pattern, "--", changelog], repo)
         if out:
             return out.split("\n")[0]  # newest commit that changed this string
@@ -791,6 +797,16 @@ LIVE_KEY_ALIASES = {
 }
 
 
+def unwrap_live_fields(blob, locale=None):
+    """The live fields inside whatever shape --live-fields was handed."""
+    # Tolerate a raw API response: {"data":[{"attributes":{...}}]}
+    if isinstance(blob, dict) and "data" in blob:
+        data = blob["data"]
+        row = (data[0] if isinstance(data, list) and data else data) or {}
+        return row.get("attributes", row)
+    return blob
+
+
 def normalize_live_fields(raw):
     """Accept either canonical names or the API's own camelCase keys."""
     out = {}
@@ -1093,8 +1109,10 @@ def audit(repo, fields_file=None, live_fields=None, locale=None, metadata_root=N
     last_released = dated[0]["version"] if dated else None
     prev_released = dated[1]["version"] if len(dated) > 1 else None
 
-    boundary = release_boundary(repo, cl["path"], last_released)
-    prev_boundary = release_boundary(repo, cl["path"], prev_released)
+    boundary = release_boundary(repo, cl["path"], last_released,
+                                dated[0]["heading"] if dated else None)
+    prev_boundary = release_boundary(repo, cl["path"], prev_released,
+                                     dated[1]["heading"] if len(dated) > 1 else None)
     boundary_kind = "release" if boundary else None
     if not boundary and cl["exists"]:
         # No release yet: everything so far goes into the entry being written, and
@@ -1442,12 +1460,7 @@ def main():
     live_fields = None
     if args.live_fields:
         with open(args.live_fields, encoding="utf-8") as fh:
-            live_fields = json.load(fh)
-        # Tolerate a raw API response: {"data":[{"attributes":{...}}]}
-        if isinstance(live_fields, dict) and "data" in live_fields:
-            data = live_fields["data"]
-            row = (data[0] if isinstance(data, list) and data else data) or {}
-            live_fields = row.get("attributes", row)
+            live_fields = unwrap_live_fields(json.load(fh), args.locale)
 
     a = audit(repo, fields_file=args.fields_file, live_fields=live_fields, locale=args.locale,
               metadata_root=args.metadata_root, first_release=args.first_release)
