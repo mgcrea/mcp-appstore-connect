@@ -80,15 +80,21 @@ describe("submit_version_for_review", () => {
     vi.fn(async (url: string, init?: RequestInit) => {
       const parsed = new URL(url);
       const method = init?.method ?? "GET";
-      const state = parsed.searchParams.get("filter[state]") ?? "";
+      // Apple takes a comma-separated state list and answers with every match.
+      const states = (parsed.searchParams.get("filter[state]") ?? "").split(",");
 
       if (parsed.pathname.includes("/reviewSubmissions") && parsed.pathname.includes("/items")) {
         return jsonResponse({ data: routes.items ?? [] });
       }
       if (parsed.pathname.endsWith("/reviewSubmissions") && method === "GET") {
-        if (state === "READY_FOR_REVIEW") return jsonResponse({ data: routes.drafts ?? [] });
-        if (state === "UNRESOLVED_ISSUES") return jsonResponse({ data: routes.returned ?? [] });
-        return jsonResponse({ data: routes.inFlight ?? [] });
+        const inFlight = ["WAITING_FOR_REVIEW", "IN_REVIEW", "CANCELING", "COMPLETING"];
+        return jsonResponse({
+          data: [
+            ...(states.includes("UNRESOLVED_ISSUES") ? (routes.returned ?? []) : []),
+            ...(states.some((st) => inFlight.includes(st)) ? (routes.inFlight ?? []) : []),
+            ...(states.includes("READY_FOR_REVIEW") ? (routes.drafts ?? []) : []),
+          ],
+        });
       }
       if (parsed.pathname.endsWith("/reviewSubmissions") && method === "POST") {
         return jsonResponse({ data: submission("READY_FOR_REVIEW") });

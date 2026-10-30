@@ -65,16 +65,16 @@ const RETURNED_STATE = "UNRESOLVED_ISSUES";
 const REJECTED_ITEM_STATE = "REJECTED";
 
 /**
- * Version states Apple still accepts into a review submission. The rejected ones
- * are editable again after review, so resubmitting them is the normal path back.
- */
-/**
  * A version that has already been added to a draft submission. Spelled the same as
  * `DRAFT_STATE` but read off the *version*, not the submission — Apple reuses the
  * word for both, and conflating them is how this state ends up looking submittable.
  */
 const STAGED_VERSION_STATE = "READY_FOR_REVIEW";
 
+/**
+ * Version states Apple still accepts into a review submission. The rejected ones
+ * are editable again after review, so resubmitting them is the normal path back.
+ */
 const SUBMITTABLE_STATES = [
   "PREPARE_FOR_SUBMISSION",
   "DEVELOPER_REJECTED",
@@ -304,13 +304,6 @@ const findStaged = async (
   }
   return undefined;
 };
-
-const findStagedDraft = async (
-  client: AppStoreConnectClient,
-  versionResponse: unknown,
-  versionId: string,
-): Promise<string | undefined> =>
-  (await findStaged(client, versionResponse, versionId))?.submissionId;
 
 /**
  * The app's returned (UNRESOLVED_ISSUES) submission that already holds this
@@ -585,7 +578,8 @@ export const registerSubmissionTools = (
         // tool's own dryRun, which stages the version deliberately. Resuming is
         // handled before `assertSubmittable`, which refuses READY_FOR_REVIEW and
         // would otherwise make the preflight a one-way door.
-        const stagedSubmissionId = await findStagedDraft(client, versionResponse, versionId);
+        const stagedSubmissionId = (await findStaged(client, versionResponse, versionId))
+          ?.submissionId;
         if (stagedSubmissionId !== undefined) {
           if (dryRun) {
             return {
@@ -636,14 +630,20 @@ export const registerSubmissionTools = (
         // creating a fresh submission alongside it is what Apple 409s on, with
         // an error that blames the *version* ("Version is not ready to be
         // submitted yet") and never mentions the submission holding it.
-        const returned = resourcesOf(
+        //
+        // One read covers all three questions below (returned, in flight, draft),
+        // split by state here rather than asked of Apple three times in a row.
+        const open = resourcesOf(
           await client.get(`/v1/apps/${appId}/reviewSubmissions`, {
             "filter[platform]": platform,
-            "filter[state]": RETURNED_STATE,
+            "filter[state]": [RETURNED_STATE, ...IN_FLIGHT_STATES, DRAFT_STATE],
             include: "appStoreVersionForReview",
-            limit: 10,
+            limit: 50,
           }),
         );
+        const inState = (states: string[]): Rec[] =>
+          open.filter((res) => states.includes(String(attributesOf(res).state)));
+        const returned = inState([RETURNED_STATE]);
         if (returned.length > 0) {
           const submission = returned[0] as Rec;
           const submissionId = submission.id as string;
@@ -668,13 +668,7 @@ export const registerSubmissionTools = (
 
         // One submission per app+platform: an in-flight one has to be cancelled
         // (or finish) before Apple will accept another.
-        const inFlight = resourcesOf(
-          await client.get(`/v1/apps/${appId}/reviewSubmissions`, {
-            "filter[platform]": platform,
-            "filter[state]": IN_FLIGHT_STATES,
-            limit: 10,
-          }),
-        );
+        const inFlight = inState(IN_FLIGHT_STATES);
         if (inFlight.length > 0) {
           const current = inFlight[0] as Rec;
           throw new PreconditionError(
@@ -685,14 +679,7 @@ export const registerSubmissionTools = (
           );
         }
 
-        const drafts = resourcesOf(
-          await client.get(`/v1/apps/${appId}/reviewSubmissions`, {
-            "filter[platform]": platform,
-            "filter[state]": DRAFT_STATE,
-            limit: 10,
-          }),
-        );
-        const draft = drafts[0];
+        const draft = inState([DRAFT_STATE])[0];
         const reusedDraft = draft !== undefined;
 
         const submissionId =
@@ -724,7 +711,7 @@ export const registerSubmissionTools = (
         // stops *after* it rather than before — there is no cheaper way to ask.
         //
         // The cost is that it moves the version to READY_FOR_REVIEW, which `assertSubmittable`
-        // refuses. `findStagedDraft` above is what keeps that from being a one-way door: the
+        // refuses. `findStaged` above is what keeps that from being a one-way door: the
         // next call finds this draft and finishes the submission instead of being turned away.
         if (!alreadyAdded) {
           await client.post("/v1/reviewSubmissionItems", {
