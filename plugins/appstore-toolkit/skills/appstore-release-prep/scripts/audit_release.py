@@ -534,10 +534,6 @@ SIDECAR_FIELD_KEYS = {
     "PRIVACY URL": "privacyPolicyUrl",
 }
 
-# Fields that PATCH to the appInfo resource rather than the version. They are not
-# scoped to a version at all, so version state does not protect them.
-APPINFO_FIELDS = {"NAME", "SUBTITLE", "PRIVACY URL"}
-
 
 def read_sidecar(repo, root):
     """The export's record of what was live: ids, version state, per-field digests."""
