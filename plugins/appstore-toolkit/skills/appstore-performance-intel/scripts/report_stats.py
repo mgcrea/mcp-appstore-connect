@@ -463,12 +463,23 @@ def warn_duplicates(path, rows):
         print("!! %s: %s\n" % (path, note))
 
 
+def load(path, args):
+    """Read a report, refuse it if truncated, warn about doubled rows, then filter.
+
+    The opening every command needs, in that order: a floor must never be
+    totalled, and the duplicate count is of the file as saved, before filters.
+    Returns (rows, columns, filter_lines).
+    """
+    rows, columns, truncated, note, _source = read_report(path)
+    guard_truncation(path, truncated, note, args.allow_truncated)
+    warn_duplicates(path, rows)
+    rows, filter_lines = apply_filters(rows, args, columns)
+    return rows, columns, filter_lines
+
+
 def cmd_summary(args):
     for path in args.files:
-        rows, columns, truncated, note, source = read_report(path)
-        guard_truncation(path, truncated, note, args.allow_truncated)
-        warn_duplicates(path, rows)
-        rows, filter_lines = apply_filters(rows, args, columns)
+        rows, columns, filter_lines = load(path, args)
         print("== %s" % path)
         for line in filter_lines:
             print("   %s" % line)
@@ -617,10 +628,7 @@ def apply_filters(rows, args, columns):
 
 
 def cmd_group(args):
-    rows, columns, truncated, note, source = read_report(args.file)
-    guard_truncation(args.file, truncated, note, args.allow_truncated)
-    warn_duplicates(args.file, rows)
-    rows, filter_lines = apply_filters(rows, args, columns)
+    rows, columns, filter_lines = load(args.file, args)
     if not rows:
         raise ReportError("No rows left after the filter. Check the value spelling.")
 
@@ -667,10 +675,7 @@ def cmd_money(args):
     anything is summed, and a total that spans currencies is meaningless no
     matter how it is computed.
     """
-    rows, columns, truncated, note, source = read_report(args.file)
-    guard_truncation(args.file, truncated, note, args.allow_truncated)
-    warn_duplicates(args.file, rows)
-    rows, money_filter_lines = apply_filters(rows, args, columns)
+    rows, columns, money_filter_lines = load(args.file, args)
     if not rows:
         raise ReportError("No rows left after the filter. Check the value spelling.")
 
@@ -1115,10 +1120,7 @@ def cmd_ratio(args):
 
     periods = []
     for path in files:
-        rows, columns, truncated, note, source = read_report(path)
-        guard_truncation(path, truncated, note, args.allow_truncated)
-        warn_duplicates(path, rows)
-        rows, filter_lines = apply_filters(rows, args, columns)
+        rows, columns, filter_lines = load(path, args)
         if not rows:
             raise ReportError("No rows left after the filter in %s." % path)
         metric = pick_metric(rows, columns, args.metric)
