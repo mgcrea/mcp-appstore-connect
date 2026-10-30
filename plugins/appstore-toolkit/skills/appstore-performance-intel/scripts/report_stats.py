@@ -806,6 +806,21 @@ def window(rows):
     return first, last, (last - first).days + 1
 
 
+def single_dated(rows):
+    """Whether `window` measured these rows by a `Date` column holding one value.
+
+    Sales reports carry Begin and End Date, which describe the period whatever
+    its length. An analytics report has only `Date`, and on a WEEKLY or MONTHLY
+    instance that is the period's first day on every row.
+    """
+    has_range = any(parse_date(r.get("Begin Date", "")) for r in rows) and any(
+        parse_date(r.get("End Date", "")) for r in rows
+    )
+    if has_range:
+        return False
+    return len({r.get("Date") for r in rows if parse_date(r.get("Date", ""))}) == 1
+
+
 def poisson_cdf(k, lam):
     """P(X <= k) for X ~ Poisson(lam), summed in log space so lam can be large."""
     if k < 0:
@@ -921,8 +936,21 @@ def cmd_rate(args):
         # too would rescale the very rate being compared against and quietly
         # invert the answer.
         overridden = bool(args.days) and path == args.files[-1]
+        base_overridden = bool(args.base_days) and path != args.files[-1]
         if overridden:
             days = args.days
+        elif base_overridden:
+            days = args.base_days
+        elif rows and first == last and single_dated(rows):
+            # A WEEKLY or MONTHLY analytics report dates every row by its
+            # period's first day, so the dates cannot say how long it was. Read
+            # as one day, a flat month comes out as a 30x collapse.
+            raise ReportError(
+                "Every row of %s carries the same Date (%s), so its window cannot be "
+                "read from the dates -- a WEEKLY or MONTHLY analytics report dates "
+                "each row by its period start. State the length: --base-days N for "
+                "the earlier files, --days N for the last." % (path, first)
+            )
         if not days:
             raise ReportError(
                 "No parseable date column in %s, so the window length is unknown. "
@@ -937,6 +965,7 @@ def cmd_rate(args):
                 "first": first,
                 "last": last,
                 "overridden": overridden,
+                "base_overridden": base_overridden,
                 "empty": empty,
                 "filters": filter_lines,
             }
@@ -950,6 +979,8 @@ def cmd_rate(args):
         # has happened, so an overridden count has to say it overrode them --
         # otherwise the line reads as a 31-day window measured over 9 days.
         note = " (from --days -- period still in progress)" if period["overridden"] else ""
+        if period["base_overridden"]:
+            note = " (from --base-days)"
         if period["first"]:
             print(
                 "   window: %s .. %s  (%d days)%s"
@@ -1364,6 +1395,13 @@ def main(argv=None):
     )
     p_rate.add_argument("files", nargs="+", help="Oldest first; each is compared to the previous.")
     p_rate.add_argument("--metric", help="Column to count. Defaults to Units.")
+    p_rate.add_argument(
+        "--base-days",
+        type=int,
+        help="Window length of every file but the last, overriding their own dates. "
+        "Needed for a WEEKLY or MONTHLY analytics report, whose rows all carry the "
+        "period's first day as their Date.",
+    )
     p_rate.add_argument(
         "--days",
         type=int,

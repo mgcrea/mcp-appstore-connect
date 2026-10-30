@@ -314,7 +314,10 @@ comparable. `rate` divides each period by its real length and prints per-day and
 per-30-day figures. Pass `--days` for the current period — the report's own dates
 span the whole month even when only nine days of it have happened, and without it
 two units in nine days reads as flat against last month's two rather than as more
-than three times the pace.
+than three times the pace. A WEEKLY or MONTHLY analytics report has the opposite
+problem: every row's `Date` is the period's first day, so its dates say nothing
+about its length. `rate` refuses such a file rather than read a month as one day;
+give the earlier periods' length with `--base-days`.
 
 ## 4. Explain the movement, don't just report it
 

@@ -209,5 +209,39 @@ class DuplicateWarningTest(unittest.TestCase):
         self.assertIn("exact duplicate", out.getvalue())
 
 
+class RateWindowTest(unittest.TestCase):
+    """A WEEKLY or MONTHLY analytics report dates every row by its period start,
+    so its dates say nothing about how long the period was. Measured from them,
+    a 30-day month is 1 day long and a flat month reads as a collapse."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="report-stats-rate-")
+
+    def write(self, name, text):
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def run_rate(self, *extra):
+        base = self.write("june.csv", "Date,Counts\n2026-06-01,3900\n")
+        current = self.write("july.csv", "Date,Counts\n2026-07-01,1170\n")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(["rate", base, current, "--metric", "Counts", "--days", "9", *extra])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_refuses_a_single_dated_base_without_base_days(self):
+        code, _out, err = self.run_rate()
+        self.assertEqual(code, 2)
+        self.assertIn("--base-days", err)
+
+    def test_base_days_sets_the_base_window(self):
+        code, out, _err = self.run_rate("--base-days", "30")
+        self.assertEqual(code, 0)
+        self.assertIn("(30 days)", out)
+        self.assertNotIn("unlikely to be noise", out)
+
+
 if __name__ == "__main__":
     unittest.main()
