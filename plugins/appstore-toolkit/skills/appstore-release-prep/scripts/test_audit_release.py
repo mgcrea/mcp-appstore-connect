@@ -102,5 +102,30 @@ class LocaleOverrideTest(unittest.TestCase):
         self.assertIn("en-US", str(ctx.exception))
 
 
+class StoreDocTest(unittest.TestCase):
+    def test_reads_a_doc_that_fences_each_field(self):
+        repo = tempfile.mkdtemp(prefix="audit-doc-")
+        write(repo, "APPSTORE.md", "\n".join([
+            "# Store copy",
+            "",
+            "## Subtitle",
+            "```",
+            "Track everything",
+            "```",
+            "",
+            "## Keywords",
+            "```",
+            "tracker,habits",
+            "```",
+            "",
+        ]))
+
+        fields = parse_store_fields(repo, "APPSTORE.md")["fields"]
+
+        self.assertIn("SUBTITLE", fields)
+        self.assertEqual(fields["SUBTITLE"]["chars"], 16)
+        self.assertIn("KEYWORDS", fields)
+
+
 if __name__ == "__main__":
     unittest.main()

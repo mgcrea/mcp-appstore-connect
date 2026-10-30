@@ -691,7 +691,11 @@ def parse_store_fields(repo, path=None):
     # a tool that reports "field missing" just because the doc is styled differently
     # is worse than no tool, because it sends you rewriting copy that already exists.
     fences = re.findall(r"```(?:txt|text)?\n(.*?)```", text, re.S)
-    body = fences[0] if fences else text
+    # One fence holding every field is the usual layout, but some docs fence each
+    # field under its own heading, and then the first fence is one field's text
+    # with no headings in it. So the whole doc, fence lines removed, is a second
+    # candidate; the first fence keeps a tie, which leaves existing docs alone.
+    bodies = [fences[0], re.sub(r"(?m)^\s*```[^\n]*\n?", "", text)] if fences else [text]
 
     HEADING_PATTERNS = (
         r"^\s{0,3}#{1,6}\s*(.+?)\s*$",          # ## Subtitle (limit 30)
@@ -708,7 +712,7 @@ def parse_store_fields(repo, path=None):
     # the first one -- silently, and in the direction that looks passing (a short
     # field is never "over limit"). Pick whichever style names the most real
     # fields, and let that style alone define the boundaries.
-    def marks_for(pat):
+    def marks_for(pat, body):
         found = []
         for m in re.finditer(pat, body, re.M):
             raw = m.group(1).strip()
@@ -718,8 +722,13 @@ def parse_store_fields(repo, path=None):
             found.append((FIELD_ALIASES.get(key), m.start(), m.end()))
         return found
 
-    candidates = [marks_for(p) for p in HEADING_PATTERNS]
-    marks = max(candidates, key=lambda ms: sum(1 for n, _s, _e in ms if n is not None))
+    def named(ms):
+        return sum(1 for n, _s, _e in ms if n is not None)
+
+    def best_marks(body):
+        return max((marks_for(p, body) for p in HEADING_PATTERNS), key=named)
+
+    body, marks = max(((b, best_marks(b)) for b in bodies), key=lambda bm: named(bm[1]))
     marks.sort(key=lambda t: t[1])
 
     fields = {}
