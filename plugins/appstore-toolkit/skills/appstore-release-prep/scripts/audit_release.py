@@ -1142,9 +1142,13 @@ def audit(repo, fields_file=None, live_fields=None, locale=None, metadata_root=N
     # has always used. Every tree is measured: one per platform is the norm.
     roots = [] if fields_file else find_metadata_roots(repo, metadata_root, app_rel)
     stores, prose = [], []
+    # Locales the trees DO hold, when --locale named one none of them has.
+    available = {}
     for root in roots:
         locales = find_metadata_locales(repo, root, locale)
         if not locales:
+            if locale:
+                available[root or "."] = find_metadata_locales(repo, root)
             continue
         st = read_metadata_tree(repo, root, locales)
         st["platform"] = tree_platform(repo, root)
@@ -1154,6 +1158,15 @@ def audit(repo, fields_file=None, live_fields=None, locale=None, metadata_root=N
                   for loc in locales
                   for n in ("description.txt", "release_notes.txt",
                             "promotional_text.txt", "subtitle.txt")]
+    if not stores and any(available.values()):
+        # Falling through to the markdown doc here reports "every field needs
+        # writing from scratch" over copy that exists -- the message that gets
+        # live store copy rewritten. A mistyped locale is not a missing listing.
+        raise SystemExit(
+            f"--locale {locale!r} has no folder in the metadata tree. Available: "
+            + "; ".join(f"{root}: {', '.join(locs)}" for root, locs in available.items() if locs)
+            + "."
+        )
     if not stores:
         store_doc = find_store_doc(repo, fields_file)
         if not fields_file and app_rel and not os.path.exists(os.path.join(repo, store_doc)):

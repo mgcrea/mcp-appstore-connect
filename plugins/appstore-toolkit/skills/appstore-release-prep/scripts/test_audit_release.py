@@ -91,5 +91,16 @@ class LiveFieldsTest(unittest.TestCase):
         self.assertEqual(unwrap_live_fields(raw), {"description": "Raw."})
 
 
+class LocaleOverrideTest(unittest.TestCase):
+    def test_refuses_a_locale_with_no_folder_rather_than_reading_the_doc(self):
+        repo = tempfile.mkdtemp(prefix="audit-locale-")
+        write(repo, "fastlane/metadata/en-US/description.txt", "A description.\n")
+        write(repo, "fastlane/metadata/en-US/name.txt", "Acme\n")
+
+        with self.assertRaises(SystemExit) as ctx:
+            audit(repo, locale="fr")
+        self.assertIn("en-US", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
