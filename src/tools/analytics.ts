@@ -548,6 +548,21 @@ export const registerAnalyticsTools = (
         // the snapshot held 3,882, on three apps at once.
         const wantedAccess =
           accessType ?? (granularity === "MONTHLY" ? "ONE_TIME_SNAPSHOT" : undefined);
+        const preferred = PREFERRED_REPORT[category];
+        // The selection's own first choice, before any of its fallbacks: the
+        // named report (or the category's usual one) in the asked-for variant,
+        // from a request of the wanted access type.
+        const wouldPick = (report: Rec, access: unknown): boolean => {
+          const name = String(attributesOf(report).name ?? "");
+          if (reportName !== undefined) {
+            if (name !== reportName) return false;
+          } else {
+            if (isDetailed(name) !== detailed) return false;
+            if (preferred !== undefined && !name.startsWith(preferred)) return false;
+          }
+          if (wantedAccess === undefined || wantedAccess === "ANY") return true;
+          return access === undefined || access === wantedAccess;
+        };
 
         const walk = await walkAnalytics(
           client,
@@ -561,8 +576,18 @@ export const registerAnalyticsTools = (
               "filter[processingDate]": processingDate,
             }),
             // Unlike the status walk, an instance is only useful if it belongs to
-            // a report we would actually pick.
-            stopWhen: (pages) => pages.some((page) => page.data.length > 0),
+            // a report we would actually pick: stopping at any instance left a
+            // wanted report in a later batch unseen, refused as missing or passed
+            // over (with MONTHLY, for the double-counting ONGOING copy).
+            stopWhen: (pages, probed, accessTypeOf) =>
+              pages.some((page, index) => {
+                const report = probed[index];
+                return (
+                  page.data.length > 0 &&
+                  report !== undefined &&
+                  wouldPick(report, accessTypeOf(report))
+                );
+              }),
           },
           notify,
         );
@@ -612,7 +637,6 @@ export const registerAnalyticsTools = (
           (report) => isDetailed(String(attributesOf(report).name ?? "")) === detailed,
         );
         const pool = variant.length > 0 ? variant : named;
-        const preferred = PREFERRED_REPORT[category];
         const byName =
           reportName === undefined && preferred !== undefined
             ? pool.filter((report) => String(attributesOf(report).name ?? "").startsWith(preferred))

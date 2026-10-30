@@ -74,7 +74,16 @@ export const walkAnalytics = async (
     includeFrameworkUsage: boolean;
     maxReportsProbed: number;
     instanceQuery?: Record<string, unknown>;
-    stopWhen?: (pages: { data: Rec[] }[]) => boolean;
+    /**
+     * Called after each batch. `probed[i]` is the report `pages[i]` belongs to,
+     * and `accessTypeOf` reads its request's access type, so a caller looking
+     * for one particular report can tell an instance it would pick from any other.
+     */
+    stopWhen?: (
+      pages: { data: Rec[] }[],
+      probed: Rec[],
+      accessTypeOf: (report: Rec) => unknown,
+    ) => boolean;
   },
   notify: (progress: number, total: number, message: string) => Promise<void>,
 ): Promise<AnalyticsWalk> => {
@@ -124,6 +133,13 @@ export const walkAnalytics = async (
    * the caller knows data exists and the floor caveat covers the rest.
    */
   const stopWhen = opts.stopWhen ?? ((pages) => pages.some((page) => page.data.length > 0));
+  const accessById = new Map(
+    requests.data.map((request) => [String(request.id), attributesOf(request).accessType]),
+  );
+  const accessTypeOf = (report: Rec): unknown => {
+    const requestId = requestIdOf.get(String(report.id));
+    return requestId === undefined ? undefined : accessById.get(requestId);
+  };
   const probed: Rec[] = [];
   const instancePages: { data: Rec[] }[] = [];
   const total = 2 + reports.length;
@@ -140,7 +156,7 @@ export const walkAnalytics = async (
     probed.push(...batch);
     instancePages.push(...pages);
     await notify(2 + probed.length, total, `Probed ${probed.length} of ${reports.length} reports`);
-    if (stopWhen(instancePages)) break;
+    if (stopWhen(instancePages, probed, accessTypeOf)) break;
   }
 
   return {

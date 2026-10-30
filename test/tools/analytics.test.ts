@@ -687,6 +687,53 @@ describe("get_analytics_report", () => {
     expect(body.selection.reportName).toBe("App Store Installation and Deletion Standard");
   });
 
+  /**
+   * The walk probes in batches and used to stop at the first instance of ANY
+   * report. A wanted report in a later batch was then never seen: refused as
+   * missing, or passed over for whatever the first batch held.
+   */
+  it("keeps walking past a batch that holds nothing it would pick", async () => {
+    const reports = Array.from({ length: 21 }, (_, i) =>
+      report(`r${i}`, i === 20 ? "App Store Purchases Standard" : `Other ${i}`, "COMMERCE"),
+    );
+    const instances = Object.fromEntries(reports.map((_, i) => [`r${i}`, [instance(`i${i}`)]]));
+
+    const result = await call(walk({ reports, instances }), {
+      category: "COMMERCE",
+      reportName: "App Store Purchases Standard",
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect((payloadOf(result) as { selection: { reportId: string } }).selection.reportId).toBe(
+      "r20",
+    );
+  });
+
+  it("walks on to the snapshot for MONTHLY when ONGOING comes first", async () => {
+    const name = "App Store Discovery and Engagement Standard";
+    const fetchImpl = walk({
+      requests: [
+        { type: "analyticsReportRequests", id: "req-o", attributes: { accessType: "ONGOING" } },
+        {
+          type: "analyticsReportRequests",
+          id: "req-s",
+          attributes: { accessType: "ONE_TIME_SNAPSHOT" },
+        },
+      ],
+      reports: {
+        "req-o": [report("ro", name, "APP_STORE_ENGAGEMENT", "req-o")],
+        "req-s": [report("rs", name, "APP_STORE_ENGAGEMENT", "req-s")],
+      },
+      instances: { ro: [instance("io", "MONTHLY")], rs: [instance("is", "MONTHLY")] },
+    });
+
+    const body = payloadOf(
+      await call(fetchImpl, { granularity: "MONTHLY", maxReportsProbed: 1 }),
+    ) as { selection: { reportId: string; accessType: string } };
+
+    expect(body.selection).toMatchObject({ reportId: "rs", accessType: "ONE_TIME_SNAPSHOT" });
+  });
+
   it("refuses a reportName that does not exist rather than guessing", async () => {
     const fetchImpl = walk({
       reports: [report("r1", "App Store Discovery and Engagement", "APP_STORE_ENGAGEMENT")],
