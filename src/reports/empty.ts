@@ -76,7 +76,15 @@ const emptyNote = (period: string): string =>
 const dataRowCount = (tsv: string): number => Math.max(0, contentLineCount(tsv.split("\n")) - 1);
 
 /** Raised when Apple rejects the probe's parameters, so no verdict is claimed from it. */
-class ProbeUnsupported extends Error {}
+class ProbeUnsupported extends Error {
+  /** Probe requests sent by then, the whole batch included, for the evidence count. */
+  constructor(
+    message: string,
+    readonly requests: number,
+  ) {
+    super(message);
+  }
+}
 /**
  * Ask a finer granularity whether the coarse period really was quiet.
  *
@@ -98,8 +106,10 @@ const probeSubPeriods = async (
 ): Promise<ProbedPeriod[]> => {
   const dates = step.dates.slice(0, maxProbes);
   const probed: ProbedPeriod[] = [];
+  let sent = 0;
 
   const one = async (date: string): Promise<ProbedPeriod> => {
+    sent += 1;
     try {
       const tsv = await client.downloadReport("/v1/salesReports", {
         "filter[frequency]": step.frequency,
@@ -115,7 +125,7 @@ const probeSubPeriods = async (
       if (!(err instanceof AppStoreConnectApiError)) throw err;
       // Apple refuses this reportType/subType at this granularity. Nothing can
       // be concluded, so say so rather than reading a rejection as a zero.
-      if (err.status === 400) throw new ProbeUnsupported(err.message);
+      if (err.status === 400) throw new ProbeUnsupported(err.message, sent);
       if (err.status === 404) {
         // A 404 on a sub-period is only evidence of emptiness once that
         // sub-period is itself past the lag; inside it, it is the same
@@ -205,7 +215,7 @@ export const emptySalesPeriod = async (
         reason: "UNDETERMINED",
         confidence: "none",
         period,
-        evidence: { requests: 2, probeUnsupported: true, probeError: err.message },
+        evidence: { requests: 1 + err.requests, probeUnsupported: true, probeError: err.message },
         note: emptyNote(`${frequency} ${reportDate}`),
         remedy:
           `Apple rejected a ${step.frequency} probe for reportType ${probe.reportType} / ` +

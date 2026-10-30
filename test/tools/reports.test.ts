@@ -331,6 +331,30 @@ describe("reports require a vendor number", () => {
     expect(body.remedy).toContain("Do NOT record");
   });
 
+  it("counts every request a rejected probe made, not a fixed two", async () => {
+    // The report, then the sentinel day, both 404; then a batch where Apple
+    // rejects one day's parameters after the whole batch has been sent.
+    let n = 0;
+    const fetchImpl = vi.fn(async () => {
+      n += 1;
+      return n === 4 ? new Response("{}", { status: 400 }) : notFound();
+    });
+    const client = await connect(
+      { ...baseConfig, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_download_sales_report",
+        arguments: { reportDate: "2026-03-15", frequency: "WEEKLY", vendorNumber: "85326407" },
+      }),
+    ) as { evidence: Record<string, unknown> };
+
+    expect(body.evidence).toMatchObject({ probeUnsupported: true });
+    expect(body.evidence.requests).toBe(fetchImpl.mock.calls.length);
+  });
+
   it("refuses to record a period that has not started", async () => {
     const fetchImpl = vi.fn(
       async () => new Response(JSON.stringify({ errors: [] }), { status: 404 }),
