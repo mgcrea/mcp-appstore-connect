@@ -610,4 +610,65 @@ describe("apply_listing", () => {
     expect((result as { isError?: boolean }).isError).toBe(true);
     expect(text(result)).toContain(".listing.json was not included");
   });
+
+  /**
+   * A locale can exist on one side only: the version-side create succeeded and
+   * the appInfo-side one failed (a taken name) on an earlier run. The re-run has
+   * to finish it, not call the missing side's fields "not returned".
+   */
+  describe("a locale that exists on one side only", () => {
+    const halfCreated = (): ReturnType<typeof vi.fn> =>
+      routes(
+        exportRoutes({
+          "/appStoreVersionLocalizations": {
+            data: [
+              ...versionLocalizations.data,
+              resource("vloc-de", "appStoreVersionLocalizations", {
+                locale: "de-DE",
+                description: "Beschreibung.",
+              }),
+            ],
+          },
+        }),
+      );
+    const deFiles = [
+      { path: "fastlane/metadata/de-DE/name.txt", content: "Acme\n" },
+      { path: "fastlane/metadata/de-DE/subtitle.txt", content: "Untertitel\n" },
+    ];
+
+    it("creates the missing side when createMissingLocales is set", async () => {
+      const fetchImpl = halfCreated();
+      const client = await connect(fetchImpl);
+      const result = await applyCall(
+        client,
+        { dryRun: false, confirm: true, createMissingLocales: true },
+        deFiles,
+      );
+
+      const writes = writeCalls(fetchImpl);
+      expect(writes).toHaveLength(1);
+      const [url, init] = writes[0]!;
+      expect(url).toMatch(/\/v1\/appInfoLocalizations$/);
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body as string).data.attributes).toEqual({
+        locale: "de-DE",
+        name: "Acme",
+        subtitle: "Untertitel",
+      });
+      expect((JSON.parse(text(result)) as { failures?: unknown }).failures).toBeUndefined();
+    });
+
+    it("says which side is missing when createMissingLocales is not set", async () => {
+      const fetchImpl = halfCreated();
+      const client = await connect(fetchImpl);
+      const result = await applyCall(client, { dryRun: false, confirm: true }, deFiles);
+
+      const payload = JSON.parse(text(result)) as { changes: { reason?: string }[] };
+      expect(payload.changes.map((c) => c.reason)).toEqual([
+        expect.stringContaining("createMissingLocales"),
+        expect.stringContaining("createMissingLocales"),
+      ]);
+      expect(writeCalls(fetchImpl)).toHaveLength(0);
+    });
+  });
 });

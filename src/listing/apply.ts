@@ -147,6 +147,8 @@ export const applyListing = async (
   const changes: PlannedChange[] = [];
   const rejections: Rejection[] = [];
   const newLocales: string[] = [];
+  // Sides of an existing locale that have no row yet, keyed `${locale}:${target}`.
+  const missingSides = new Set<string>();
 
   for (const [locale, fields] of Object.entries(manifest.locales)) {
     if (wanted && !wanted.has(locale)) continue;
@@ -175,15 +177,35 @@ export const applyListing = async (
       const chars = charCount(local);
       const limit = FIELD_LIMITS[field];
 
-      const { action, reason } = isNew
-        ? { action: "change" as ChangeAction, reason: undefined }
-        : classify(
-            local,
-            liveFields?.[field],
-            sidecar.baseline[locale]?.[field],
-            opts.force,
-            opts.allowClear,
-          );
+      // A locale can exist on one side only, when an earlier run created the
+      // version row and the appInfo create failed (or the reverse). That side's
+      // fields have nothing to compare against: create its row, like a new locale.
+      const target = FIELD_TARGET[field];
+      const sideMissing = !isNew && live.localizationIds[locale]?.[target] === undefined;
+      if (sideMissing && !opts.createMissingLocales) {
+        changes.push({
+          locale,
+          field,
+          target,
+          action: "skipped",
+          chars,
+          limit: 0,
+          reason: `Locale ${locale} has no ${target} localization yet. Pass createMissingLocales: true to add it.`,
+        });
+        continue;
+      }
+      if (sideMissing) missingSides.add(`${locale}:${target}`);
+
+      const { action, reason } =
+        isNew || sideMissing
+          ? { action: "change" as ChangeAction, reason: undefined }
+          : classify(
+              local,
+              liveFields?.[field],
+              sidecar.baseline[locale]?.[field],
+              opts.force,
+              opts.allowClear,
+            );
 
       if (action === "change") {
         const breach = overLimit(field, local);
@@ -250,7 +272,7 @@ export const applyListing = async (
       }
 
       try {
-        if (isNew) {
+        if (isNew || missingSides.has(`${locale}:${target}`)) {
           await createLocalization(client, sidecar, locale, target, attributes);
         } else {
           const id = live.localizationIds[locale]?.[target];
