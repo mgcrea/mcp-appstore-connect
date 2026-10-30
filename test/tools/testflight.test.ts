@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/client";
 import { describe, expect, it, vi } from "vitest";
 
-import { baseConfig, connect, groupBody, jsonResponse, postCall } from "../helpers.js";
+import { baseConfig, callArgs, connect, groupBody, jsonResponse, postCall } from "../helpers.js";
 
 describe("create_beta_group", () => {
   const APP_ID = "6798236186";
@@ -83,5 +83,22 @@ describe("create_beta_group", () => {
 
     expect(result.isError).toBe(true);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("list_beta_testers", () => {
+  it("filters by group and email together rather than dropping the email", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ data: [] }));
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    await client.callTool({
+      name: "app_store_connect_list_beta_testers",
+      arguments: { groupId: "g1", email: "alice@example.com" },
+    });
+
+    const url = new URL(callArgs(fetchImpl)[0]);
+    expect(url.pathname).toBe("/v1/betaTesters");
+    expect(url.searchParams.get("filter[betaGroups]")).toBe("g1");
+    expect(url.searchParams.get("filter[email]")).toBe("alice@example.com");
   });
 });

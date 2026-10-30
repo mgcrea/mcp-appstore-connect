@@ -73,9 +73,12 @@ export const registerTestflightTools = (
     async ({ groupId, email, limit, savePath }) =>
       wrapSaved(savePath, async () =>
         summarizeResponse(
-          groupId
-            ? await client.get(`/v1/betaGroups/${groupId}/betaTesters`, compact({ limit }))
-            : await client.get("/v1/betaTesters", compact({ "filter[email]": email, limit })),
+          // One endpoint for both filters: the group's own betaTesters path takes
+          // no email filter, so passing both there silently dropped the email.
+          await client.get(
+            "/v1/betaTesters",
+            compact({ "filter[betaGroups]": groupId, "filter[email]": email, limit }),
+          ),
         ),
       ),
   );
