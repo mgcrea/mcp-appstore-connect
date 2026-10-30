@@ -140,6 +140,14 @@ class ReportError(Exception):
     """Something about the input makes the requested number unanswerable."""
 
 
+class ProvenZero(ReportError):
+    """A saved empty result that establishes a real zero (NO_ROWS, REGION_EMPTY).
+
+    Every command refuses it, because there is no table to total. `rate` alone
+    catches it for the period it tests, since a zero is exactly what it can test.
+    """
+
+
 def read_saved(saved, dump_path):
     """(text, source, why-not) for the complete file a tool result points at.
 
@@ -223,7 +231,7 @@ def read_report(path):
                 reason = blob.get("reason", "UNKNOWN")
                 confidence = blob.get("confidence", "none")
                 if reason in ("NO_ROWS", "REGION_EMPTY"):
-                    raise ReportError(
+                    raise ProvenZero(
                         "%s reports an EMPTY period (%s, %s). That is a real zero -- "
                         "record it as 0, not as missing data. %s"
                         % (path, reason, confidence, blob.get("remedy", ""))
@@ -900,10 +908,18 @@ def cmd_rate(args):
     """
     periods = []
     for path in args.files:
-        rows, columns, truncated, note, source = read_report(path)
+        try:
+            rows, columns, truncated, note, source = read_report(path)
+        except ProvenZero:
+            # A saved empty result is how a zero period usually arrives. As the
+            # period under test it is the zero-run below; as a base it stays the
+            # error it is everywhere else.
+            if path != args.files[-1]:
+                raise
+            rows, columns, truncated, note, source = [], [], False, "", path
         guard_truncation(path, truncated, note, args.allow_truncated)
         warn_duplicates(path, rows)
-        rows, filter_lines = apply_filters(rows, args, columns)
+        rows, filter_lines = apply_filters(rows, args, columns) if columns else ([], [])
 
         # A period with nothing in it is the single most interesting case this
         # command has -- "no downloads for 27 days, is that real?" is a zero-run,
@@ -930,8 +946,11 @@ def cmd_rate(args):
                     "window by. If it is not a real zero, check the spelling." % path
                 )
 
-        metric = args.metric or (UNITS if UNITS in columns else pick_metric(rows, columns, None))
-        if metric not in columns:
+        # A saved zero has no columns at all: it counts as zero Units.
+        metric = args.metric or (
+            UNITS if UNITS in columns or not columns else pick_metric(rows, columns, None)
+        )
+        if columns and metric not in columns:
             raise ReportError("No column %r in %s." % (metric, path))
         # A rate is a count per day, and the Poisson test below assumes counts.
         # Money is neither: proceeds are per-unit here, and "3.49 events" is not

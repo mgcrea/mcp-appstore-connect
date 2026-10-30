@@ -272,5 +272,42 @@ class MoneyTest(unittest.TestCase):
         self.assertIn("KZT", out)
 
 
+class RateZeroPeriodTest(unittest.TestCase):
+    """For a single-app account a saved empty result is the only form a zero
+    period comes in, and SKILL.md says rate tests it against the base rate."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="report-stats-zero-")
+
+    def write(self, name, text):
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def test_tests_a_proven_zero_against_the_base_rate(self):
+        base = self.write(
+            "base.csv",
+            "Date,Units\n" + "".join("2026-06-%02d,1\n" % d for d in range(1, 31)),
+        )
+        zero = self.write(
+            "zero.json", json.dumps({"empty": True, "reason": "NO_ROWS", "confidence": "proven"})
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = main(["rate", base, zero, "--days", "27"])
+        self.assertEqual(code, 0)
+        self.assertIn("real zero over 27 days", out.getvalue())
+
+    def test_an_unproven_empty_still_refuses(self):
+        base = self.write("base.csv", "Date,Units\n2026-06-01,1\n2026-06-02,1\n")
+        unproven = self.write(
+            "u.json", json.dumps({"empty": True, "reason": "NO_ROWS_OBSERVED", "confidence": "bounded"})
+        )
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = main(["rate", base, unproven, "--days", "27"])
+        self.assertEqual(code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
