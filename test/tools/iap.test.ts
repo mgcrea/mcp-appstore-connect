@@ -489,6 +489,25 @@ describe("in-app purchase availability", () => {
     ]);
   });
 
+  it("reads a never-attached review screenshot 404 as nothing, not an error", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ errors: [{ status: "404", code: "NOT_FOUND" }] }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+
+    const result = await callTool(
+      "app_store_connect_get_iap_review_screenshot",
+      { inAppPurchaseId: IAP_ID },
+      fetchImpl,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(payloadOf(result).data).toBeNull();
+  });
+
   it("reads a never-set availability 404 as 'not set', not an error", async () => {
     // Apple 404s a to-one sub-resource that was never created, and names the
     // PARENT's id in the message — raw, that reads as a broken request.

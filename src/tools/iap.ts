@@ -275,11 +275,18 @@ export const registerIapTools = (
       annotations: { readOnlyHint: true },
     },
     async ({ inAppPurchaseId, savePath }) =>
-      wrapSaved(savePath, async () =>
-        summarizeResponse(
-          await client.get(`/v2/inAppPurchases/${inAppPurchaseId}/appStoreReviewScreenshot`),
-        ),
-      ),
+      wrapSaved(savePath, async () => {
+        // Apple 404s a to-one sub-resource that was never created, as the delete
+        // tool below already allows for.
+        const response = await getOrNull(
+          client,
+          `/v2/inAppPurchases/${inAppPurchaseId}/appStoreReviewScreenshot`,
+        );
+        if (response === null) {
+          return { data: null, note: "No review screenshot has been attached." };
+        }
+        return summarizeResponse(response);
+      }),
   );
 
   server.registerTool(
