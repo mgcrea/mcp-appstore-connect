@@ -203,6 +203,15 @@ const readConfigFile = (path: string): FileConfig => {
  * is not a conflict with a `p8Path` in the config file, it simply overrides it.
  * Only naming both *within one source* is a genuine ambiguity.
  */
+/**
+ * An inline PEM whose newlines arrived as literal `\n`, which is the only way
+ * `docker --env-file` and many CI secret stores can carry a multi-line value.
+ * Left as is it passes the PEM check and then fails every signature, so turn
+ * the escapes back into newlines. A key with real newlines is never touched.
+ */
+const unescapeNewlines = (pem: string): string =>
+  pem.includes("\n") ? pem : pem.replaceAll("\\n", "\n");
+
 export const resolvePrivateKey = (
   env: NodeJS.ProcessEnv,
   file: FileConfig = {},
@@ -224,7 +233,7 @@ export const resolvePrivateKey = (
   if (source.inline && source.path) {
     throw new Error(`Set only one of ${source.inlineLabel} or ${source.pathLabel}, not both.`);
   }
-  if (source.inline) return source.inline;
+  if (source.inline) return unescapeNewlines(source.inline);
   if (source.path) {
     const path = expandTilde(source.path);
     let key: string;

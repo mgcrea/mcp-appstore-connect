@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { signJwt } from "#/client/auth";
 import { loadConfig, resolveConfigPath, isConfigured, setupInstructions } from "#/config";
 
 const pem = generateKeyPairSync("ec", { namedCurve: "P-256" })
@@ -362,5 +363,20 @@ describe("contact", () => {
       noConfig,
     );
     expect(config.contact).toEqual({ firstName: "Ada" });
+  });
+});
+
+describe("inline key escaping", () => {
+  // docker --env-file cannot carry a multi-line value, so the PEM arrives with
+  // literal backslash-n sequences. It must still sign, not pass as "loaded" and
+  // then fail on every call.
+  it("accepts a PEM whose newlines arrive as literal \\n", () => {
+    const escaped = pem.trim().replace(/\n/g, "\\n");
+    const cfg = loadConfig({ ...baseEnv(), APP_STORE_CONNECT_P8: escaped }, noConfig);
+
+    expect(cfg.privateKey).toBe(pem.trim());
+    expect(() =>
+      signJwt({ keyId: "ABCD123456", issuerId: "issuer", privateKey: cfg.privateKey ?? "" }, 0, 60),
+    ).not.toThrow();
   });
 });
