@@ -881,6 +881,27 @@ describe("review submission items", () => {
     expect(body.note).toContain("sub-1");
   });
 
+  // Apple's `limit` spans the union of apps, so a partial page may hold one
+  // app's rows only, the same warning builds and beta groups give.
+  it("warns that a partial page across several apps may favour one", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        data: [submission("sub-1", "COMPLETE", []), submission("sub-2", "COMPLETE", [])],
+        meta: { paging: { total: 5, limit: 2 } },
+      }),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_review_submissions",
+        arguments: { appId: ["1", "2"], limit: 2 },
+      }),
+    ) as { note?: string };
+
+    expect(body.note).toContain("across all 2 apps");
+  });
+
   it("says when the page is not the whole list", async () => {
     const next = "https://api.appstoreconnect.apple.com/v1/reviewSubmissions?cursor=Mg";
     const fetchImpl = vi.fn(async () =>

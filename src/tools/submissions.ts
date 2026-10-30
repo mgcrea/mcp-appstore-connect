@@ -18,6 +18,7 @@ import {
   confirmArg,
   dryRunArg,
   limitArg,
+  multiAppLimitNote,
   PLATFORMS,
   PreconditionError,
   savePathArg,
@@ -146,12 +147,21 @@ const summarizeItem = (item: Rec): ItemSummary => {
 const summarizeSubmissions = (
   response: unknown,
   { details, failed }: ItemDetails = { details: new Map(), failed: [] },
+  appIds: string | string[] = [],
 ): unknown => {
   const sideloaded = includedIndex(response, "reviewSubmissionItems");
+  // The paging verdict (`incomplete`, `meta`, `links.next`) comes from
+  // summarizeResponse, so a capped list is never read as the whole one.
+  const summarized = summarizeResponse(response) as Record<string, unknown>;
+  const notes = [
+    multiAppLimitNote(appIds, summarized.incomplete),
+    failed.length > 0
+      ? `Could not read what each item is for ${failed.join(", ")}; those rows list their ` +
+        `items with id and state only.`
+      : undefined,
+  ].filter((note) => note !== undefined);
   return {
-    // The paging verdict (`incomplete`, `meta`, `links.next`) comes from
-    // summarizeResponse, so a capped list is never read as the whole one.
-    ...(summarizeResponse(response) as Record<string, unknown>),
+    ...summarized,
     data: resourcesOf(response).map((res) => {
       const items =
         details.get(String(res.id)) ??
@@ -167,13 +177,7 @@ const summarizeSubmissions = (
         ...(items.length > 0 ? { items } : {}),
       };
     }),
-    ...(failed.length > 0
-      ? {
-          note:
-            `Could not read what each item is for ${failed.join(", ")}; those rows list their ` +
-            `items with id and state only.`,
-        }
-      : {}),
+    ...(notes.length > 0 ? { note: notes.join(" ") } : {}),
   };
 };
 
@@ -533,7 +537,7 @@ export const registerSubmissionTools = (
             limit,
           }),
         );
-        return summarizeSubmissions(response, await returnedItemDetails(client, response));
+        return summarizeSubmissions(response, await returnedItemDetails(client, response), appId);
       }),
   );
 

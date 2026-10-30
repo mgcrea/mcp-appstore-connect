@@ -228,6 +228,22 @@ export const appIdsArg = z
   );
 
 /**
+ * The warning a partial page across several apps needs, or undefined. Apple's
+ * `limit` is one cap over the union of the apps, so the rows that did not fit
+ * may all belong to one of them.
+ */
+export const multiAppLimitNote = (
+  appIds: string | string[],
+  incomplete: unknown,
+): string | undefined =>
+  Array.isArray(appIds) && appIds.length > 1 && incomplete !== undefined
+    ? `Apple applies \`limit\` across all ${appIds.length} apps at once rather than per ` +
+      `app, and its sort cannot interleave them, so the rows that did not fit may all ` +
+      `belong to one app — see \`incomplete\`. An app missing from this page has not been ` +
+      `shown to have nothing. Raise limit, or ask per app.`
+    : undefined;
+
+/**
  * Flatten a collection response, adding the `appId` each row belongs to.
  *
  * `summarizeResponse` drops `relationships`, which is where the owning app is —
@@ -249,23 +265,14 @@ export const summarizeWithApp = (
     appId: relatedId(res, "app"),
   }));
   const summarized = summarizeResponse(response) as Record<string, unknown>;
-  const many = Array.isArray(appIds) && appIds.length > 1;
   // Only when the page really is a subset — `incomplete` is summarizeResponse's
   // own verdict on that, so a page that happens to be exactly `limit` long and
   // complete does not get warned about.
-  const partial = summarized.incomplete !== undefined;
+  const note = multiAppLimitNote(appIds, summarized.incomplete);
   return {
     ...summarized,
     data: rows,
-    ...(many && partial
-      ? {
-          note:
-            `Apple applies \`limit\` across all ${appIds.length} apps at once rather than per ` +
-            `app, and its sort cannot interleave them, so the rows that did not fit may all ` +
-            `belong to one app — see \`incomplete\`. An app missing from this page has not been ` +
-            `shown to have nothing. Raise limit, or ask per app.`,
-        }
-      : {}),
+    ...(note !== undefined ? { note } : {}),
   };
 };
 
