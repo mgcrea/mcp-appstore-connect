@@ -509,6 +509,8 @@ describe("remove_version_from_submission", () => {
     /** Successive `/appStoreVersions/` reads: staged first, then post-delete. */
     versionAfter?: unknown;
     drafts?: unknown[];
+    /** UNRESOLVED_ISSUES submissions: a rejection the developer has replied to. */
+    returned?: unknown[];
     items?: unknown[];
     /** Report the version only in `included`, never on an item relationship. */
     sideloadVersion?: boolean;
@@ -532,6 +534,9 @@ describe("remove_version_from_submission", () => {
         });
       }
       if (parsed.pathname.endsWith("/reviewSubmissions")) {
+        if (parsed.searchParams.get("filter[state]") === "UNRESOLVED_ISSUES") {
+          return jsonResponse({ data: routes.returned ?? [] });
+        }
         return jsonResponse({ data: routes.drafts ?? [draft] });
       }
       if (parsed.pathname.includes("/appStoreVersions/")) {
@@ -612,6 +617,35 @@ describe("remove_version_from_submission", () => {
 
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("app_store_connect_cancel_review_submission");
+    expect(deleteCall(fetchImpl)).toBeUndefined();
+  });
+
+  /**
+   * Rejected, replied to in the Resolution Center: the version is READY_FOR_REVIEW
+   * on no draft, but its submission is UNRESOLVED_ISSUES, which cancel refuses.
+   * Pointing at cancel there sends the caller round in a loop.
+   */
+  it("names the rejected submission rather than pointing at cancel", async () => {
+    const fetchImpl = routed({
+      drafts: [],
+      returned: [
+        {
+          id: "sub-returned",
+          type: "reviewSubmissions",
+          attributes: { platform: "MAC_OS", state: "UNRESOLVED_ISSUES" },
+          relationships: {
+            appStoreVersionForReview: { data: { id: VERSION_ID, type: "appStoreVersions" } },
+          },
+        },
+      ],
+    });
+
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("sub-returned");
+    expect(textOf(result)).toContain("app_store_connect_submit_version_for_review");
+    expect(textOf(result)).not.toContain("has already gone to Apple");
     expect(deleteCall(fetchImpl)).toBeUndefined();
   });
 

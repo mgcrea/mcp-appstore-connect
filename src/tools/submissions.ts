@@ -797,6 +797,25 @@ export const registerSubmissionTools = (
 
         if (staged === undefined) {
           const state = attrs.appStoreState;
+          // A rejection the developer replied to also leaves the version
+          // READY_FOR_REVIEW on no draft, but its submission is UNRESOLVED_ISSUES,
+          // which cancel_review_submission refuses — so it needs its own answer.
+          const returnedId = await findResolvedInReturned(client, versionResponse, versionId);
+          if (returnedId !== undefined) {
+            throw new PreconditionError(
+              `This version is ${STAGED_VERSION_STATE} as the resolved item of rejected ` +
+                `submission ${returnedId} (UNRESOLVED_ISSUES), not on a draft, so there is ` +
+                `nothing to remove here, and cancel_review_submission refuses a rejected ` +
+                `submission. Resubmit it as it is with ` +
+                `app_store_connect_submit_version_for_review, or remove it from that submission ` +
+                `in App Store Connect's web UI to change its build.`,
+              {
+                appStoreState: state,
+                versionString: attrs.versionString,
+                submissionId: returnedId,
+              },
+            );
+          }
           throw new PreconditionError(
             state === STAGED_VERSION_STATE
               ? `This version is ${STAGED_VERSION_STATE} but sits on no un-submitted draft for ` +
