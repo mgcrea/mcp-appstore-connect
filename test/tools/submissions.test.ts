@@ -73,6 +73,12 @@ describe("submit_version_for_review", () => {
     /** Submissions Apple rejected and handed back (UNRESOLVED_ISSUES). */
     returned?: unknown[];
     items?: unknown[];
+    /** The app's asset packs (`/v1/apps/{id}/backgroundAssets`). */
+    packs?: unknown[];
+    /** Every pack's versions, with their sideloaded App Store releases under `included`. */
+    packVersions?: { data: unknown[]; included?: unknown[] };
+    /** Answer the POST adding an asset-pack item with this error response. */
+    refuseAssetItem?: () => Response;
   };
 
   /** Route by URL, method and `filter[state]` — the three list GETs share a path. */
@@ -83,6 +89,20 @@ describe("submit_version_for_review", () => {
       // Apple takes a comma-separated state list and answers with every match.
       const states = (parsed.searchParams.get("filter[state]") ?? "").split(",");
 
+      if (parsed.pathname.endsWith("/backgroundAssets")) {
+        return jsonResponse({ data: routes.packs ?? [] });
+      }
+      if (parsed.pathname.includes("/backgroundAssets/") && parsed.pathname.endsWith("/versions")) {
+        return jsonResponse(routes.packVersions ?? { data: [] });
+      }
+      if (
+        routes.refuseAssetItem &&
+        parsed.pathname.endsWith("/reviewSubmissionItems") &&
+        method === "POST" &&
+        String(init?.body).includes("backgroundAssetVersion")
+      ) {
+        return routes.refuseAssetItem();
+      }
       if (parsed.pathname.includes("/reviewSubmissions") && parsed.pathname.includes("/items")) {
         return jsonResponse({ data: routes.items ?? [] });
       }
@@ -432,6 +452,208 @@ describe("submit_version_for_review", () => {
     expect(include.split(",")).toContain("app");
   });
 
+  /**
+   * Shaped from Chevalet 1.0.0 (app 6828592664), which ships two Apple-hosted asset packs.
+   * The version id is one of the two `14|…` targets its macOS submission carried; the pack
+   * identifier and release states are illustrative.
+   */
+  const PACK_VERSION = "80a3af96-5df8-4681-8133-78ba31ddf3d5";
+  const packs = (releaseState: string): Partial<Routes> => ({
+    packs: [
+      {
+        id: "pack-a",
+        type: "backgroundAssets",
+        attributes: { assetPackIdentifier: "io.mgcrea.chevalet.pack-a", archived: false },
+      },
+    ],
+    packVersions: {
+      data: [
+        {
+          id: PACK_VERSION,
+          type: "backgroundAssetVersions",
+          attributes: { version: "1", state: "COMPLETE", platforms: ["MAC_OS"] },
+          relationships: {
+            appStoreRelease: {
+              data: { type: "backgroundAssetVersionAppStoreReleases", id: "rel-a" },
+            },
+          },
+        },
+      ],
+      included: [
+        {
+          id: "rel-a",
+          type: "backgroundAssetVersionAppStoreReleases",
+          attributes: { state: releaseState },
+        },
+      ],
+    },
+  });
+
+  const isAssetItemPost = (call: unknown[]): boolean =>
+    String(call[0]).endsWith("/v1/reviewSubmissionItems") &&
+    (call[1] as RequestInit | undefined)?.method === "POST" &&
+    String((call[1] as RequestInit).body).includes("backgroundAssetVersion");
+
+  const assetItemBodies = (fetchImpl: ReturnType<typeof vi.fn>): unknown[] =>
+    fetchImpl.mock.calls
+      .filter(isAssetItemPost)
+      .map((call) => JSON.parse(String((call[1] as RequestInit).body)));
+
+  type AssetPacksBody = {
+    assetPacks: { packs: { action: string; reason?: string }[]; note?: string };
+  };
+
+  /**
+   * The gap this closes: a cancel strips the asset packs from the submission, and a
+   * resubmit that adds only the version ships the app without them.
+   */
+  it("adds the app's pending asset-pack versions before submitting", async () => {
+    const fetchImpl = routed(packs("PREPARE_FOR_SUBMISSION"));
+
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBeFalsy();
+    expect(assetItemBodies(fetchImpl)).toEqual([
+      {
+        data: {
+          type: "reviewSubmissionItems",
+          relationships: {
+            reviewSubmission: { data: { type: "reviewSubmissions", id: SUBMISSION_ID } },
+            backgroundAssetVersion: {
+              data: { type: "backgroundAssetVersions", id: PACK_VERSION },
+            },
+          },
+        },
+      },
+    ]);
+    // Added before the submission goes to Apple, never after.
+    const assetAt = fetchImpl.mock.calls.findIndex(isAssetItemPost);
+    const patchAt = fetchImpl.mock.calls.findIndex(
+      (call) => (call[1] as RequestInit | undefined)?.method === "PATCH",
+    );
+    expect(assetAt).toBeGreaterThan(-1);
+    expect(assetAt).toBeLessThan(patchAt);
+    expect((payloadOf(result) as AssetPacksBody).assetPacks.packs).toEqual([
+      expect.objectContaining({ versionId: PACK_VERSION, action: "add" }),
+    ]);
+  });
+
+  it("dryRun reports the asset packs it would add and adds none", async () => {
+    const fetchImpl = routed(packs("PREPARE_FOR_SUBMISSION"));
+
+    const result = await callTool(
+      { versionId: VERSION_ID, dryRun: true, confirm: true },
+      fetchImpl,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(assetItemBodies(fetchImpl)).toEqual([]);
+    expect(patchCall(fetchImpl)).toBeUndefined();
+    expect((payloadOf(result) as AssetPacksBody).assetPacks.packs).toEqual([
+      expect.objectContaining({ versionId: PACK_VERSION, action: "wouldAdd" }),
+    ]);
+  });
+
+  it("reports a pack it does not add, with the reason", async () => {
+    const fetchImpl = routed(packs("ACCEPTED"));
+
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBeFalsy();
+    expect(assetItemBodies(fetchImpl)).toEqual([]);
+    const { assetPacks } = payloadOf(result) as AssetPacksBody;
+    expect(assetPacks.packs[0]).toMatchObject({
+      action: "notAdded",
+      appStoreReleaseState: "ACCEPTED",
+    });
+    expect(assetPacks.packs[0]?.reason).toContain("Add for Review");
+    expect(assetPacks.note).toContain("Add for Review");
+  });
+
+  it("adds the asset packs when resuming a staged draft too", async () => {
+    const fetchImpl = routed({
+      ...packs("PREPARE_FOR_SUBMISSION"),
+      version: (withApp) => versionBody({ appStoreState: "READY_FOR_REVIEW" }, {}, withApp),
+      drafts: [submission("READY_FOR_REVIEW")],
+      items: [stagedItem],
+    });
+
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBeFalsy();
+    expect(assetItemBodies(fetchImpl)).toHaveLength(1);
+    expect(JSON.parse(textOf(result)).resumedDraft).toBe(true);
+  });
+
+  it("does not add an asset-pack version the draft already holds", async () => {
+    const fetchImpl = routed({
+      ...packs("PREPARE_FOR_SUBMISSION"),
+      version: (withApp) => versionBody({ appStoreState: "READY_FOR_REVIEW" }, {}, withApp),
+      drafts: [submission("READY_FOR_REVIEW")],
+      items: [
+        stagedItem,
+        {
+          id: "item-2",
+          type: "reviewSubmissionItems",
+          relationships: {
+            backgroundAssetVersion: {
+              data: { id: PACK_VERSION, type: "backgroundAssetVersions" },
+            },
+          },
+        },
+      ],
+    });
+
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBeFalsy();
+    expect(assetItemBodies(fetchImpl)).toEqual([]);
+    expect((payloadOf(result) as AssetPacksBody).assetPacks.packs[0]?.action).toBe(
+      "alreadyOnSubmission",
+    );
+  });
+
+  it("never reads asset packs when includeAssetPacks is false", async () => {
+    const fetchImpl = routed(packs("PREPARE_FOR_SUBMISSION"));
+
+    const result = await callTool(
+      { versionId: VERSION_ID, includeAssetPacks: false, confirm: true },
+      fetchImpl,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(fetchImpl.mock.calls.some((call) => String(call[0]).includes("backgroundAssets"))).toBe(
+      false,
+    );
+    expect(patchCall(fetchImpl)).toBeDefined();
+  });
+
+  it("does not submit when Apple refuses an asset pack, and says what is staged", async () => {
+    const fetchImpl = routed({
+      ...packs("PREPARE_FOR_SUBMISSION"),
+      refuseAssetItem: () =>
+        new Response(
+          JSON.stringify({
+            errors: [{ status: "409", code: "STATE_ERROR", title: "refused", detail: "refused" }],
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBe(true);
+    expect(patchCall(fetchImpl)).toBeUndefined();
+    expect(textOf(result)).toContain("includeAssetPacks: false");
+    expect(textOf(result)).toContain("NOT been sent to Apple");
+  });
+
+  it("leaves assetPacks out for an app that has none", async () => {
+    const result = await callTool({ versionId: VERSION_ID, confirm: true }, routed());
+
+    expect(payloadOf(result)).not.toHaveProperty("assetPacks");
+  });
+
   it("names the app relationship, not the platform, when the app id is missing", async () => {
     // Force the pre-fix shape: a response that never carries `app`.
     const fetchImpl = routed({ version: () => versionBody({}, {}, false) });
@@ -689,12 +911,118 @@ describe("remove_version_from_submission", () => {
 describe("cancel_review_submission", () => {
   const SUBMISSION_ID = "sub-1";
 
-  const routed = (state: string): ReturnType<typeof vi.fn> =>
-    vi.fn(async () =>
-      jsonResponse({
+  const routed = (
+    state: string,
+    items: unknown[] | (() => Response) = [],
+  ): ReturnType<typeof vi.fn> =>
+    vi.fn(async (url: string) => {
+      if (String(url).includes("/items")) {
+        return typeof items === "function" ? items() : jsonResponse({ data: items });
+      }
+      return jsonResponse({
         data: { id: SUBMISSION_ID, type: "reviewSubmissions", attributes: { state } },
+      });
+    });
+
+  /**
+   * Chevalet's macOS submission (app 6828592664) as it stood on 2026-11-02: ids and states
+   * recorded from list_review_submissions. Which relationship each item carries is what
+   * Apple's items endpoint answers with `include`; the version and the two asset packs are
+   * certain from the targets, the in-app purchase is the remaining item.
+   */
+  const chevaletItems = (): unknown[] => [
+    {
+      id: "ZWUxYjM0ZmUtZjdhMS00N2M0LTgzNTItOGYyYTZjYThjNTI3fDZ8ODk0MTgxNDAy",
+      type: "reviewSubmissionItems",
+      attributes: { state: "READY_FOR_REVIEW" },
+      relationships: {
+        appStoreVersion: {
+          data: { type: "appStoreVersions", id: "05801b55-237e-48c8-9fc1-00ea3679759c" },
+        },
+      },
+    },
+    {
+      id: "ZWUxYjM0ZmUtZjdhMS00N2M0LTgzNTItOGYyYTZjYThjNTI3fDE3fDQ4YTNkMDRiLThkODAtNGI5Mi1iYzcwLTljNzYyNzk0ZGY2Mw",
+      type: "reviewSubmissionItems",
+      attributes: { state: "READY_FOR_REVIEW" },
+      relationships: {
+        inAppPurchaseVersion: {
+          data: { type: "inAppPurchaseVersions", id: "48a3d04b-8d80-4b92-bc70-9c762794df63" },
+        },
+      },
+    },
+    ...["76f69a11-31c0-4978-a9fa-6fd83955659d", "80a3af96-5df8-4681-8133-78ba31ddf3d5"].map(
+      (target) => ({
+        id: Buffer.from(`ee1b34fe-f7a1-47c4-8352-8f2a6ca8c527|14|${target}`).toString("base64"),
+        type: "reviewSubmissionItems",
+        attributes: { state: "ACCEPTED" },
+        relationships: {
+          backgroundAssetVersion: { data: { type: "backgroundAssetVersions", id: target } },
+        },
       }),
+    ),
+  ];
+
+  type CancelBody = {
+    canceled?: boolean;
+    otherItems: { kind?: string; restoredBy: string; how: string }[];
+    note: string;
+  };
+
+  /** The decision Chevalet's cancel was made without: what else leaves with the version. */
+  it("dryRun lists every other item and how it comes back, and cancels nothing", async () => {
+    const fetchImpl = routed("WAITING_FOR_REVIEW", chevaletItems());
+
+    const result = await callTool(
+      { submissionId: SUBMISSION_ID, dryRun: true, confirm: true },
+      fetchImpl,
     );
+
+    expect(result.isError).toBeFalsy();
+    expect(patchCall(fetchImpl)).toBeUndefined();
+    const body = payloadOf(result) as CancelBody;
+    expect(body.canceled).toBe(false);
+    expect(body.otherItems.map((item) => [item.kind, item.restoredBy])).toEqual([
+      ["inAppPurchaseVersion", "webUi"],
+      ["backgroundAssetVersion", "api"],
+      ["backgroundAssetVersion", "api"],
+    ]);
+    expect(body.otherItems[0]?.how).toContain("Add for Review");
+    expect(body.note).toContain("3 item(s) besides the version");
+  });
+
+  it("reports what the cancel removed", async () => {
+    const fetchImpl = routed("WAITING_FOR_REVIEW", chevaletItems());
+
+    const result = await callTool({ submissionId: SUBMISSION_ID, confirm: true }, fetchImpl);
+
+    expect(result.isError).toBeFalsy();
+    expect(patchCall(fetchImpl)).toBeDefined();
+    expect((payloadOf(result) as CancelBody).otherItems).toHaveLength(3);
+  });
+
+  it("does not cancel when the items cannot be read", async () => {
+    const fetchImpl = routed(
+      "WAITING_FOR_REVIEW",
+      () =>
+        new Response(JSON.stringify({ errors: [{ status: "500", code: "UNEXPECTED_ERROR" }] }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const client = await connect(
+      { ...baseConfig, allowWrites: true, maxRetries: 0 },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const result = await client.callTool({
+      name: "app_store_connect_cancel_review_submission",
+      arguments: { submissionId: SUBMISSION_ID, confirm: true },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(patchCall(fetchImpl)).toBeUndefined();
+  });
 
   const callTool = async (
     args: Record<string, unknown>,
@@ -758,12 +1086,30 @@ describe("review submission items", () => {
     relationships,
   });
 
-  it("carries each submission's items and their state", async () => {
-    const fetchImpl = vi.fn(async () =>
-      jsonResponse({
-        data: [submission("sub-1", "WAITING_FOR_REVIEW", ["i1"])],
-        included: [item("i1", "READY_FOR_REVIEW")],
-      }),
+  /**
+   * Chevalet's macOS submission was WAITING_FOR_REVIEW with four items, and the list showed
+   * only their ids and states. Whether a cancel would strip an asset pack is decided by what
+   * each item is, on every row, not just a rejected one.
+   */
+  it("says what each item is on a submission still with Apple", async () => {
+    const fetchImpl = vi.fn(async (url: string) =>
+      String(url).includes("/v1/reviewSubmissions/sub-1/items")
+        ? jsonResponse({
+            data: [
+              item("i1", "READY_FOR_REVIEW", {
+                appStoreVersion: { data: { type: "appStoreVersions", id: "ver-1" } },
+              }),
+              item("i2", "ACCEPTED", {
+                backgroundAssetVersion: {
+                  data: { type: "backgroundAssetVersions", id: "bav-1" },
+                },
+              }),
+            ],
+          })
+        : jsonResponse({
+            data: [submission("sub-1", "WAITING_FOR_REVIEW", ["i1", "i2"])],
+            included: [item("i1", "READY_FOR_REVIEW"), item("i2", "ACCEPTED")],
+          }),
     );
     const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
 
@@ -776,9 +1122,58 @@ describe("review submission items", () => {
 
     const url = new URL(callArgs(fetchImpl)[0]);
     expect(url.searchParams.get("include")?.split(",")).toContain("items");
-    // No second request: nothing came back rejected.
+    expect(body.data[0]?.items).toEqual([
+      { id: "i1", state: "READY_FOR_REVIEW", kind: "appStoreVersion", targetId: "ver-1" },
+      { id: "i2", state: "ACCEPTED", kind: "backgroundAssetVersion", targetId: "bav-1" },
+    ]);
+  });
+
+  it("skips the item read for a submission with no items", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ data: [submission("sub-1", "COMPLETE", [])] }),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    await client.callTool({
+      name: "app_store_connect_list_review_submissions",
+      arguments: { appId: "1" },
+    });
+
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(body.data[0]?.items).toEqual([{ id: "i1", state: "READY_FOR_REVIEW" }]);
+  });
+
+  /**
+   * Recorded from Chevalet: an item id is base64 of `<submission>|<kind>|<target>`. With no
+   * relationship to name it, the number and target are still worth reporting, as a number.
+   */
+  it("decodes the kind number and target when Apple names no relationship", async () => {
+    const id =
+      "ZWUxYjM0ZmUtZjdhMS00N2M0LTgzNTItOGYyYTZjYThjNTI3fDE3fDQ4YTNkMDRiLThkODAtNGI5Mi1iYzcwLTljNzYyNzk0ZGY2Mw";
+    const fetchImpl = vi.fn(async (url: string) =>
+      String(url).includes("/items")
+        ? jsonResponse({ data: [item(id, "READY_FOR_REVIEW")] })
+        : jsonResponse({
+            data: [submission("sub-1", "WAITING_FOR_REVIEW", [id])],
+            included: [item(id, "READY_FOR_REVIEW")],
+          }),
+    );
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const body = payloadOf(
+      await client.callTool({
+        name: "app_store_connect_list_review_submissions",
+        arguments: { appId: "1" },
+      }),
+    ) as { data: { items: unknown[] }[] };
+
+    expect(body.data[0]?.items).toEqual([
+      {
+        id,
+        state: "READY_FOR_REVIEW",
+        kindCode: 17,
+        targetId: "48a3d04b-8d80-4b92-bc70-9c762794df63",
+      },
+    ]);
   });
 
   /**

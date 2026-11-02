@@ -781,14 +781,20 @@ export const registerIapTools = (
         "An app's **first** non-consumable cannot be submitted by this tool, or by any other " +
         "part of the API. Apple refuses it with " +
         "`STATE_ERROR.FIRST_NON_CONSUMABLE_MUST_BE_SUBMITTED_ON_VERSION` — it has to travel " +
-        "inside the version's own review submission, and there is no route that puts it there: " +
-        "`reviewSubmissionItems` rejects both `inAppPurchase` and `inAppPurchaseV2` with " +
-        "RELATIONSHIP.UNKNOWN, `appStoreVersions` has no `inAppPurchases` relationship, and the " +
-        "IAP has no `appStoreVersion` relationship. Submitting the version first does NOT pick " +
+        "inside the version's own review submission, and this server has no route that puts " +
+        "it there: `reviewSubmissionItems` rejects both `inAppPurchase` and `inAppPurchaseV2` " +
+        "with RELATIONSHIP.UNKNOWN (neither is in Apple's published spec, 4.5.1), " +
+        "`appStoreVersions` has no `inAppPurchases` relationship, and the IAP has no " +
+        "`appStoreVersion` relationship. The spec does list an `inAppPurchaseVersion` " +
+        "relationship on `reviewSubmissionItems`, fed by `/v2/inAppPurchases/{id}/versions`. " +
+        "Whether Apple accepts a first non-consumable through it is untested, and nothing " +
+        "here uses it. Submitting the version first does NOT pick " +
         "it up — the version goes to review alone and the IAP stays `READY_TO_SUBMIT`, which " +
-        "ships an app whose paywall sells a product Apple never approved. Do that one in the " +
-        "App Store Connect web UI: the version page's **Add for Review** panel lists the IAP " +
-        "beside the version; add both, then submit.",
+        "ships an app whose paywall sells a product Apple never approved. Cancelling the " +
+        "version's submission later removes the IAP from it too " +
+        "(app_store_connect_cancel_review_submission's dryRun lists it first). Do that one in " +
+        "the App Store Connect web UI: the version page's **Add for Review** panel lists the " +
+        "IAP beside the version; add both, then submit.",
       inputSchema: z.object({ inAppPurchaseId: inAppPurchaseIdArg, confirm: confirmArg }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     },

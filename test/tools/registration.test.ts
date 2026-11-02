@@ -32,6 +32,7 @@ describe("tool registration", () => {
       "app_store_connect_list_versions",
       "app_store_connect_get_version",
       "app_store_connect_list_review_submissions",
+      "app_store_connect_list_asset_packs",
       "app_store_connect_list_app_infos",
       "app_store_connect_list_app_info_localizations",
       "app_store_connect_get_app_info_localization",

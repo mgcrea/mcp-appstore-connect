@@ -486,6 +486,15 @@ preflight says rebuild first, `app_store_connect_remove_version_from_submission`
 back to `PREPARE_FOR_SUBMISSION`; `cancel_review_submission` cannot do it, because the
 draft has never been with Apple.
 
+**Before cancelling a submission already with Apple, run `cancel_review_submission` with
+`dryRun: true`.** A cancel removes every item on the submission, not just the version, and
+resubmitting the version brings none of them back. The dry run lists each other item with
+`restoredBy`. Asset packs (`backgroundAssetVersion`) are `api`, because
+`submit_version_for_review` re-adds the app's pending asset-pack versions and reports each one
+under `assetPacks`. A first non-consumable IAP, subscriptions and in-app events are `webUi`:
+re-add them by hand in the version page's **Add for Review** panel. Tell the user which
+`webUi` items a cancel will strip before doing it.
+
 **Create versions with `releaseType: AFTER_APPROVAL` unless the user asks to hold the
 release.** Apple then ships the version the moment review passes, and nothing waits on a
 button someone has to remember to press:

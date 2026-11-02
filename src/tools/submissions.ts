@@ -13,6 +13,12 @@ import {
   summarizeResponse,
 } from "#/client/shape";
 import {
+  type AssetPack,
+  type AssetPackPlan,
+  planAssetPacks,
+  readAssetPacks,
+} from "#/tools/assetpacks";
+import {
   appIdsArg,
   compact,
   confirmArg,
@@ -114,7 +120,69 @@ const ITEM_KINDS = [
   "gameCenterLeaderboardVersion",
 ] as const;
 
-type ItemSummary = { id: unknown; state: unknown; kind?: string; targetId?: string };
+type ItemSummary = {
+  id: unknown;
+  state: unknown;
+  kind?: string;
+  targetId?: string;
+  /** Apple's internal kind number, reported only when no relationship named the item. */
+  kindCode?: number;
+};
+
+/**
+ * An item id is base64 of `<submissionId>|<kind number>|<target id>`. Not a
+ * documented format, so it is only a fallback for an item whose relationship
+ * Apple did not return, and the number is reported as a number, never mapped
+ * to a name: which number means what is not something the API states.
+ */
+const decodeItemId = (id: unknown): { kindCode: number; targetId: string } | undefined => {
+  if (typeof id !== "string") return undefined;
+  const match = /^[^|]+\|(\d+)\|(.+)$/.exec(Buffer.from(id, "base64").toString("utf8"));
+  return match ? { kindCode: Number(match[1]), targetId: String(match[2]) } : undefined;
+};
+
+/**
+ * Whether an item a cancel removes can be put back through this server, and how.
+ *
+ * A cancel moves every item to REMOVED, and Apple does not put any of them back
+ * when the version is submitted again. Each one has to be re-added, and for most
+ * kinds this server has no tool that does it.
+ */
+type Restore = { restoredBy: "api" | "webUi"; how: string };
+
+const WEB_UI = "App Store Connect's Add for Review panel on the version page";
+
+const restoreOf = (kind: string | undefined): Restore => {
+  switch (kind) {
+    case "appStoreVersion":
+      return { restoredBy: "api", how: "app_store_connect_submit_version_for_review" };
+    case "backgroundAssetVersion":
+      return {
+        restoredBy: "api",
+        how:
+          "app_store_connect_submit_version_for_review re-adds the app's pending asset-pack " +
+          "versions (includeAssetPacks, on by default) and reports each pack it did not add",
+      };
+    case "inAppPurchaseVersion":
+      return {
+        restoredBy: "webUi",
+        how:
+          `${WEB_UI}. An app's first non-consumable can only go back that way; a second or ` +
+          `later in-app purchase can instead be submitted alone with ` +
+          `app_store_connect_submit_in_app_purchase_for_review`,
+      };
+    case undefined:
+      return {
+        restoredBy: "webUi",
+        how: `${WEB_UI}: Apple did not say what this item is, so nothing here can re-add it`,
+      };
+    default:
+      return {
+        restoredBy: "webUi",
+        how: `${WEB_UI}: this server has no tool that adds a ${kind} to a review submission`,
+      };
+  }
+};
 
 /** The ids on the far side of a to-many relationship. */
 const relatedIds = (res: Rec, name: string): string[] => {
@@ -128,11 +196,32 @@ const relatedIds = (res: Rec, name: string): string[] => {
 /** One item's state and, when its relationships were included, what it is. */
 const summarizeItem = (item: Rec): ItemSummary => {
   const kind = ITEM_KINDS.find((name) => relatedId(item, name) !== undefined);
+  const decoded = kind === undefined ? decodeItemId(item.id) : undefined;
   return {
     id: item.id,
     state: attributesOf(item).state,
     ...(kind !== undefined ? { kind, targetId: relatedId(item, kind) } : {}),
+    ...decoded,
   };
+};
+
+/**
+ * One submission's items, each saying what it is. Asks for every kind; if Apple
+ * refuses that include, falls back to ids and states, which still decode to a
+ * kind number and target.
+ */
+const readItems = async (
+  client: AppStoreConnectClient,
+  submissionId: string,
+): Promise<ItemSummary[]> => {
+  const path = `/v1/reviewSubmissions/${submissionId}/items`;
+  try {
+    return resourcesOf(await client.get(path, { include: ITEM_KINDS.join(","), limit: 50 })).map(
+      summarizeItem,
+    );
+  } catch {
+    return resourcesOf(await client.get(path, { limit: 50 })).map(summarizeItem);
+  }
 };
 
 /**
@@ -183,40 +272,41 @@ const summarizeSubmissions = (
 
 type ItemDetails = { details: Map<string, ItemSummary[]>; failed: string[] };
 
+/** How many submissions' items are read at once, so a long list does not burst Apple's rate limit. */
+const ITEM_READ_CONCURRENCY = 5;
+
 /**
- * The items of each returned submission, with what each one is. Only the
- * UNRESOLVED_ISSUES rows get this second request: those are the ones where
- * "which item did Apple reject?" is the question, and `items.appStoreVersion`
- * cannot be sideloaded from the list endpoint itself.
+ * The items of every listed submission that has any, with what each one is.
+ * One extra request per such row, because `items.<kind>` cannot be sideloaded
+ * from the list endpoint itself, and an item's id and state alone cannot say
+ * whether it is the version, an in-app purchase or an asset pack. That is the
+ * question both "which item did Apple reject?" and "what would a cancel strip?"
+ * turn on.
  *
  * Extra detail, never a precondition: a submission whose items cannot be read
  * falls back to the sideloaded id+state and is named in `failed`, rather than
  * failing a list that had already succeeded.
  */
-const returnedItemDetails = async (
+const itemDetails = async (
   client: AppStoreConnectClient,
   response: unknown,
 ): Promise<ItemDetails> => {
-  const returned = resourcesOf(response).filter(
-    (res) => attributesOf(res).state === RETURNED_STATE,
-  );
+  const withItems = resourcesOf(response).filter((res) => relatedIds(res, "items").length > 0);
   const failed: string[] = [];
-  const entries = await Promise.all(
-    returned.map(async (res) => {
-      const id = String(res.id);
-      try {
-        const items = await client.get(`/v1/reviewSubmissions/${id}/items`, {
-          include: ITEM_KINDS.join(","),
-          limit: 50,
-        });
-        return [[id, resourcesOf(items).map(summarizeItem)] as const];
-      } catch {
-        failed.push(id);
-        return [];
-      }
-    }),
-  );
-  return { details: new Map(entries.flat()), failed };
+  const details = new Map<string, ItemSummary[]>();
+  for (let i = 0; i < withItems.length; i += ITEM_READ_CONCURRENCY) {
+    await Promise.all(
+      withItems.slice(i, i + ITEM_READ_CONCURRENCY).map(async (res) => {
+        const id = String(res.id);
+        try {
+          details.set(id, await readItems(client, id));
+        } catch {
+          failed.push(id);
+        }
+      }),
+    );
+  }
+  return { details, failed };
 };
 
 /**
@@ -435,6 +525,114 @@ const resubmitReturned = async (
   };
 };
 
+type AssetPackStep =
+  | {
+      packs: (Omit<AssetPackPlan, "action"> & { action: AssetPackPlan["action"] | "wouldAdd" })[];
+      note?: string;
+    }
+  | { error: string; note: string }
+  | { skipped: true };
+
+/**
+ * Put the app's pending asset-pack versions on the draft, before it is handed
+ * to Apple. An asset pack reaches the App Store only as an item of the app's
+ * review submission, and nothing else in a submit adds it: a version submitted
+ * alone goes to review without the packs it downloads. That is exactly what a
+ * cancel-then-resubmit leaves behind.
+ *
+ * `undefined` for an app with no asset packs, so the answer only mentions packs
+ * when there are some. A failed *read* does not block the submit (it is
+ * reported loudly instead); a failed *add* does, because the draft is then
+ * half-built and submitting it would ship without a pack Apple was asked for.
+ */
+const addAssetPacks = async (
+  client: AppStoreConnectClient,
+  opts: {
+    appId: string;
+    platform: string;
+    submissionId: string;
+    /** False for a submission created by this call, which can hold no pack yet. */
+    readExisting: boolean;
+    dryRun: boolean;
+    include: boolean;
+  },
+): Promise<AssetPackStep | undefined> => {
+  const { appId, platform, submissionId, readExisting, dryRun, include } = opts;
+  if (!include) return { skipped: true };
+
+  let packs: AssetPack[];
+  try {
+    ({ packs } = await readAssetPacks(client, appId, { platform }));
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : String(err),
+      note:
+        "Could not read this app's asset packs, so none were added. If the app ships Apple-" +
+        `hosted asset packs, check app_store_connect_list_asset_packs and ${WEB_UI}.`,
+    };
+  }
+  if (packs.length === 0) return undefined;
+
+  const onSubmission = new Set<string>();
+  if (readExisting) {
+    const items = await client.get(`/v1/reviewSubmissions/${submissionId}/items`, {
+      include: "backgroundAssetVersion",
+      limit: 50,
+    });
+    for (const item of resourcesOf(items)) {
+      const id = relatedId(item, "backgroundAssetVersion");
+      if (id !== undefined) onSubmission.add(id);
+    }
+  }
+
+  const plans = planAssetPacks(packs, onSubmission);
+  const added: string[] = [];
+  if (!dryRun) {
+    for (const plan of plans) {
+      if (plan.action !== "add" || plan.versionId === undefined) continue;
+      try {
+        await client.post("/v1/reviewSubmissionItems", {
+          data: {
+            type: "reviewSubmissionItems",
+            relationships: {
+              reviewSubmission: { data: { type: "reviewSubmissions", id: submissionId } },
+              backgroundAssetVersion: {
+                data: { type: "backgroundAssetVersions", id: plan.versionId },
+              },
+            },
+          },
+        });
+        added.push(plan.versionId);
+      } catch (err) {
+        throw new PreconditionError(
+          `Apple refused to add asset pack ${String(plan.assetPackIdentifier)} (version ` +
+            `${String(plan.version)}, ${plan.versionId}) to review submission ${submissionId}: ` +
+            `${err instanceof Error ? err.message : String(err)}. The submission has NOT been ` +
+            `sent to Apple. The version is staged on it` +
+            (added.length > 0 ? `, as are asset-pack version(s) ${added.join(", ")}` : "") +
+            `. Re-run to retry, pass includeAssetPacks: false to submit without the remaining ` +
+            `packs, or add them in ${WEB_UI}.`,
+          { submissionId, assetPacks: plans, added },
+        );
+      }
+    }
+  }
+
+  const notAdded = plans.filter((plan) => plan.action === "notAdded");
+  return {
+    packs: plans.map((plan) =>
+      dryRun && plan.action === "add" ? { ...plan, action: "wouldAdd" as const } : plan,
+    ),
+    ...(notAdded.length > 0
+      ? {
+          note:
+            `${notAdded.length} asset pack(s) were not added; each says why. One that has to ` +
+            `ship with this release must be added in ${WEB_UI}.`,
+        }
+      : {}),
+  };
+};
+
 /**
  * Read the version and report every reason it cannot be submitted at once. Apple
  * answers an unsubmittable version with a generic error that names no cause, and
@@ -499,11 +697,16 @@ export const registerSubmissionTools = (
       description:
         "List an app's App Store review submissions and their state (READY_FOR_REVIEW is a draft " +
         "not yet sent to Apple; WAITING_FOR_REVIEW and IN_REVIEW are with Apple). Each row " +
-        "carries the id of the version under review and its `items` with their state. On an " +
-        "UNRESOLVED_ISSUES row (rejected) each item also says what it is (`kind`: " +
-        "appStoreVersion, inAppPurchaseVersion, ...) and its `targetId`, so the item in state " +
-        "REJECTED is the one Apple turned down. Apple's rejection message itself is not in the " +
-        "API: read it in App Store Connect's App Review page.",
+        "carries the id of the version under review and its `items`, each with its state, " +
+        "what it is (`kind`: appStoreVersion, inAppPurchaseVersion, backgroundAssetVersion " +
+        "for an asset pack, subscriptionVersion, ...) and its `targetId`. On an " +
+        "UNRESOLVED_ISSUES row (rejected) the item in state REJECTED is the one Apple turned " +
+        "down. When Apple names no relationship for an item, it carries `kindCode`, Apple's " +
+        "internal kind number decoded from the item id, instead of a `kind`. A submission " +
+        "holding more than the version loses all of it on a cancel: see " +
+        "app_store_connect_cancel_review_submission. Costs one extra request per submission " +
+        "with items. Apple's rejection message itself is not in the API: read it in App Store " +
+        "Connect's App Review page.",
       inputSchema: z.object({
         appId: appIdsArg,
         platform: z.enum(PLATFORMS).optional().describe("Filter by platform."),
@@ -530,7 +733,7 @@ export const registerSubmissionTools = (
             limit,
           }),
         );
-        return summarizeSubmissions(response, await returnedItemDetails(client, response), appId);
+        return summarizeSubmissions(response, await itemDetails(client, response), appId);
       }),
   );
 
@@ -559,12 +762,31 @@ export const registerSubmissionTools = (
         "category, unanswered export compliance on the build, unset pricing, unpublished app " +
         "privacy — which is otherwise only visible by attempting a real submission. A dry run " +
         "of a draft does stage the version on it, which moves the version to READY_FOR_REVIEW; " +
-        "calling again without dryRun finishes that same submission.",
-      inputSchema: z.object({ versionId: versionIdArg, dryRun: dryRunArg, confirm: confirmArg }),
+        "calling again without dryRun finishes that same submission. " +
+        "Asset packs: an app's Apple-hosted asset packs (Background Assets) reach the App " +
+        "Store only as items of this same submission, so by default this also adds the newest " +
+        "processed version of each pack whose App Store release is PREPARE_FOR_SUBMISSION or " +
+        "REJECTED, before submitting. `assetPacks` reports every pack: added, already on the " +
+        "submission, or not added with the reason. A dry run reports `wouldAdd` and adds none. " +
+        "The rejection branch resubmits the items already on the submission and adds no packs. " +
+        "An app's first non-consumable in-app purchase is NOT added — see " +
+        "app_store_connect_submit_in_app_purchase_for_review.",
+      inputSchema: z.object({
+        versionId: versionIdArg,
+        includeAssetPacks: z
+          .boolean()
+          .default(true)
+          .describe(
+            "Add the app's pending asset-pack versions to the submission before submitting. " +
+              "Defaults to true. Pass false to submit the version without them.",
+          ),
+        dryRun: dryRunArg,
+        confirm: confirmArg,
+      }),
       // Hands the version to Apple irrecoverably, like submit_in_app_purchase_for_review.
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async ({ versionId, dryRun = false }) =>
+    async ({ versionId, includeAssetPacks = true, dryRun = false }) =>
       wrap(async () => {
         // `app` must be included explicitly: unlike `build`, Apple omits that
         // relationship entirely from a bare GET, so the app id is not derivable
@@ -581,6 +803,16 @@ export const registerSubmissionTools = (
         const stagedSubmissionId = (await findStaged(client, versionResponse, versionId))
           ?.submissionId;
         if (stagedSubmissionId !== undefined) {
+          // findStaged only matches with both present.
+          const staged = resourceOf(versionResponse);
+          const assetPacks = await addAssetPacks(client, {
+            appId: String(relatedId(staged, "app")),
+            platform: String(attributesOf(staged).platform),
+            submissionId: stagedSubmissionId,
+            readExisting: true,
+            dryRun,
+            include: includeAssetPacks,
+          });
           if (dryRun) {
             return {
               submissionId: stagedSubmissionId,
@@ -589,6 +821,7 @@ export const registerSubmissionTools = (
               addedItem: false,
               dryRun: true,
               submitted: false,
+              ...compact({ assetPacks }),
               note:
                 "Already staged on this app's draft submission and NOT handed to Apple. " +
                 "Apple accepted the version onto the draft, so it is ready. Re-run without " +
@@ -609,6 +842,7 @@ export const registerSubmissionTools = (
             versionId,
             resumedDraft: true,
             addedItem: false,
+            ...compact({ assetPacks }),
             submission: summarizeResponse(resumed),
           };
         }
@@ -725,6 +959,15 @@ export const registerSubmissionTools = (
           });
         }
 
+        const assetPacks = await addAssetPacks(client, {
+          appId,
+          platform,
+          submissionId,
+          readExisting: reusedDraft,
+          dryRun,
+          include: includeAssetPacks,
+        });
+
         if (dryRun) {
           return {
             submissionId,
@@ -733,6 +976,7 @@ export const registerSubmissionTools = (
             addedItem: !alreadyAdded,
             dryRun: true,
             submitted: false,
+            ...compact({ assetPacks }),
             note:
               "The version is ready: Apple accepted it onto the draft submission, which is " +
               "still yours and has NOT been sent for review. Staging it moved the version to " +
@@ -751,6 +995,7 @@ export const registerSubmissionTools = (
           versionId,
           reusedDraft,
           addedItem: !alreadyAdded,
+          ...compact({ assetPacks }),
           submission: summarizeResponse(submitted),
         };
       }),
@@ -859,14 +1104,26 @@ export const registerSubmissionTools = (
         "Withdraw a review submission from Apple, returning its versions to an editable state. " +
         "Only works while the submission is still with Apple and has not started completing; a " +
         "cancelled submission cannot be un-cancelled — submit again to re-enter the queue. " +
+        "A cancel removes EVERY item on the submission, not just the version, and submitting " +
+        "the version again does not bring them back. Asset-pack versions " +
+        "(backgroundAssetVersion) are re-added by app_store_connect_submit_version_for_review. " +
+        "An app's first non-consumable in-app purchase, subscriptions, in-app events, custom " +
+        "product pages, experiments and Game Center items can only be put back by hand, in App " +
+        "Store Connect's Add for Review panel on the version page. Call with dryRun first: it " +
+        "lists every item besides the version and how each one comes back, and cancels " +
+        "nothing. A real cancel reports the same list as `otherItems`. " +
         "This is the wrong tool for a rejection: a submission in UNRESOLVED_ISSUES is already " +
         "yours to edit, and app_store_connect_submit_version_for_review sends it back without " +
         "losing the queue position or restarting the review of any in-app purchase attached " +
         "to it.",
-      inputSchema: z.object({ submissionId: submissionIdArg, confirm: confirmArg }),
+      inputSchema: z.object({
+        submissionId: submissionIdArg,
+        dryRun: dryRunArg,
+        confirm: confirmArg,
+      }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async ({ submissionId }) =>
+    async ({ submissionId, dryRun = false }) =>
       wrap(async () => {
         // Apple accepts a cancel on a returned submission, so the description
         // alone is the only thing between an agent and the mistake RETURNED_STATE
@@ -883,11 +1140,34 @@ export const registerSubmissionTools = (
           );
         }
 
-        return summarizeResponse(
+        // What the cancel will strip. Read before cancelling and never skipped:
+        // the item list is the warning, and a cancel that could not produce it
+        // is the one that strands an asset pack or a first IAP unnoticed. A
+        // read that fails therefore fails the cancel.
+        const otherItems = (await readItems(client, submissionId))
+          .filter((item) => item.kind !== "appStoreVersion" && item.state !== "REMOVED")
+          .map((item) => ({ ...item, ...restoreOf(item.kind) }));
+        const byHand = otherItems.filter((item) => item.restoredBy === "webUi");
+        const note =
+          otherItems.length === 0
+            ? "The submission holds only the version, which submit_version_for_review puts back."
+            : `Cancelling removes ${otherItems.length} item(s) besides the version, and ` +
+              `resubmitting the version does not bring them back. ` +
+              (byHand.length > 0
+                ? `${byHand.length} of them can only be re-added by hand in ${WEB_UI}; see ` +
+                  `each item's \`how\`.`
+                : `submit_version_for_review re-adds all of them.`);
+
+        if (dryRun) {
+          return { submissionId, state, dryRun: true, canceled: false, otherItems, note };
+        }
+
+        const canceled = summarizeResponse(
           await client.patch(`/v1/reviewSubmissions/${submissionId}`, {
             data: { type: "reviewSubmissions", id: submissionId, attributes: { canceled: true } },
           }),
         );
+        return { ...(isRecord(canceled) ? canceled : { data: canceled }), otherItems, note };
       }),
   );
 };

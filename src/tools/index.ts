@@ -6,6 +6,7 @@ import { isConfigured, type Config } from "#/config";
 import { registerAnalyticsTools } from "#/tools/analytics";
 import { registerAppInfoTools } from "#/tools/appinfos";
 import { registerAppTools } from "#/tools/apps";
+import { registerAssetPackTools } from "#/tools/assetpacks";
 import { registerBuildTools } from "#/tools/builds";
 import { registerBundleIdTools } from "#/tools/bundleids";
 import { registerCategoryTools } from "#/tools/categories";
@@ -71,6 +72,8 @@ export const registerTools = (
   // list_versions and list_builds to answer, and get wrong.
   registerPortfolioTools(server, client, allowWrites);
   registerSubmissionTools(server, client, allowWrites);
+  // Asset packs ride inside the review submission, so they sit beside it.
+  registerAssetPackTools(server, client);
   registerAppInfoTools(server, client, allowWrites);
   // Gates a first submission trips over, none of them version-scoped: category,
   // content rights (on registerAppTools), price, and the review contact. The
