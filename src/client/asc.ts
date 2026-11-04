@@ -14,6 +14,13 @@ export type { Query, QueryValue } from "#/client/http";
 export type RequestOptions = {
   query?: Query;
   body?: unknown;
+  /**
+   * Override the `Accept` header. Almost every endpoint answers
+   * `application/json`; the few that do not (diagnostic logs answer
+   * `application/vnd.apple.diagnostic-logs+json`) declare their own type in
+   * Apple's spec, and asking for the wrong one risks a 406.
+   */
+  accept?: string;
 };
 
 export type AscClientOptions = {
@@ -55,6 +62,9 @@ const DOWNLOAD_HOSTS = [
   // e.g. asp-us-west-2.s3.amazonaws.com, and the s3-<region> spelling.
   /^asp-[a-z0-9-]+\.s3([.-][a-z0-9-]+)*\.amazonaws\.com$/,
 ];
+
+/** Unauthenticated Apple endpoints `getPublicJson` may reach. */
+const PUBLIC_HOSTS = new Set(["itunes.apple.com"]);
 
 const mib = (bytes: number): string => `${Math.round(bytes / 1024 / 1024)} MiB`;
 
@@ -216,7 +226,7 @@ export class AppStoreConnectClient {
   }
 
   async request<T = unknown>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
-    const res = await this.fetchWithRetry(method, path, opts, "application/json");
+    const res = await this.fetchWithRetry(method, path, opts, opts.accept ?? "application/json");
     const text = await res.text();
 
     if (!res.ok) {
@@ -376,6 +386,43 @@ export class AppStoreConnectClient {
 
   get<T = unknown>(path: string, query?: Query): Promise<T> {
     return this.request<T>("GET", path, { query });
+  }
+
+  /**
+   * GET a public, unauthenticated Apple endpoint — today only the iTunes Lookup
+   * API, which holds the one thing App Store Connect does not: the aggregate
+   * star rating. It is not the API host, so this skips `baseUrl` and, above all,
+   * the `Authorization` header: the JWT is never sent to it. The host is pinned
+   * for the same reason `downloadSignedFile` pins its own.
+   */
+  async getPublicJson<T = unknown>(url: string): Promise<T> {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" || !PUBLIC_HOSTS.has(parsed.hostname)) {
+      throw new Error(`Refusing to fetch ${parsed.host}: not a known public Apple endpoint.`);
+    }
+    const res = await withRetry(
+      (signal) =>
+        this.fetchImpl(url, {
+          method: "GET",
+          headers: { Accept: "application/json", "User-Agent": this.userAgent },
+          signal,
+        }),
+      {
+        maxRetries: this.maxRetries,
+        label: `GET ${parsed.origin}${parsed.pathname}`,
+        tag: TAG,
+        logger: this.logger,
+        timeoutMs: this.timeoutMs,
+      },
+    );
+    const text = await res.text();
+    if (!res.ok) {
+      throw new AppStoreConnectApiError(
+        `GET ${parsed.host}${parsed.pathname} failed: HTTP ${res.status} ${res.statusText}`,
+        { status: res.status, errors: text.slice(0, 500) },
+      );
+    }
+    return safeJsonParse(text) as T;
   }
 
   /**

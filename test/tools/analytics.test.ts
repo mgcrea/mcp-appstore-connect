@@ -709,6 +709,34 @@ describe("get_analytics_report", () => {
     );
   });
 
+  // "Did crashes rise with version X?" is answered by a report APP_USAGE does
+  // not pick by default, so it has to be reachable by name.
+  it("reaches the App Crashes report by name, past the category's usual pick", async () => {
+    const fetchImpl = walk({
+      reports: [
+        report("r-inst", "App Store Installation and Deletion Standard", "APP_USAGE"),
+        report("r-crash", "App Crashes", "APP_USAGE"),
+      ],
+      instances: { "r-inst": [instance("i-inst")], "r-crash": [instance("i-crash")] },
+    });
+
+    const result = await call(fetchImpl, { category: "APP_USAGE", reportName: "App Crashes" });
+
+    expect(result.isError).toBeFalsy();
+    expect(
+      (payloadOf(result) as { selection: { reportId: string; reportName: string } }).selection,
+    ).toMatchObject({ reportId: "r-crash", reportName: "App Crashes" });
+  });
+
+  it("names the crash reports in its description", async () => {
+    const client = await connect(baseConfig);
+    const tool = (await client.listTools()).tools.find(
+      (t) => t.name === "app_store_connect_get_analytics_report",
+    );
+    expect(JSON.stringify(tool)).toContain("App Crashes");
+    expect(JSON.stringify(tool)).toContain("App Crashes Expanded");
+  });
+
   it("walks on to the snapshot for MONTHLY when ONGOING comes first", async () => {
     const name = "App Store Discovery and Engagement Standard";
     const fetchImpl = walk({

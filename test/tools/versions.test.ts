@@ -1098,3 +1098,23 @@ describe("get_app includeLiveVersion", () => {
     expect(body.live[0]?.build.minOsVersion).toBe("26.0");
   });
 });
+
+/**
+ * Apple's API has no switch for resetting the rating summary, so the tools that
+ * would carry it must point at where it lives rather than offer a fake field.
+ */
+describe("rating summary reset", () => {
+  it("is documented as web-only on create_version and update_version, with no field", async () => {
+    const client = await connect({ ...baseConfig, allowWrites: true });
+    const tools = (await client.listTools()).tools;
+    for (const name of ["app_store_connect_create_version", "app_store_connect_update_version"]) {
+      const tool = tools.find((t) => t.name === name);
+      expect(tool?.description, name).toContain("web-only");
+      expect(tool?.description, name).toContain("Reset iPhone and iPad App Summary Rating");
+      expect(tool?.description, name).toContain("App Store Version Release");
+      expect(Object.keys(tool?.inputSchema.properties ?? {}), name).not.toContain(
+        "resetRatingSummary",
+      );
+    }
+  });
+});

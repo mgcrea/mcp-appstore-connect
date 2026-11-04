@@ -446,3 +446,50 @@ describe("download size caps", () => {
     expect(await capped(fetchImpl).downloadReport("/v1/salesReports", {})).toBe(tsv);
   });
 });
+
+describe("AppStoreConnectClient.getPublicJson", () => {
+  const clientWith = (fetchImpl: ReturnType<typeof vi.fn>): AppStoreConnectClient =>
+    new AppStoreConnectClient({
+      tokenProvider: spyProvider(),
+      fetch: fetchImpl as unknown as typeof fetch,
+      maxRetries: 0,
+    });
+
+  // The JWT authorizes the whole account; a public endpoint must never see it.
+  it("never sends the JWT to the public lookup host", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ resultCount: 0, results: [] }));
+
+    await clientWith(fetchImpl).getPublicJson("https://itunes.apple.com/lookup?id=1&country=fr");
+
+    expect(callUrl(fetchImpl)).toBe("https://itunes.apple.com/lookup?id=1&country=fr");
+    const headers = callInit(fetchImpl).headers as Record<string, string>;
+    expect(headers).not.toHaveProperty("Authorization");
+  });
+
+  it("refuses any other host before fetching", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({}));
+
+    await expect(
+      clientWith(fetchImpl).getPublicJson("https://evil.example.com/lookup?id=1"),
+    ).rejects.toThrow(/not a known public Apple endpoint/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("AppStoreConnectClient request accept override", () => {
+  it("sends the Accept type the caller names", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ productData: [] }));
+    const client = new AppStoreConnectClient({
+      tokenProvider: spyProvider(),
+      fetch: fetchImpl as unknown as typeof fetch,
+    });
+
+    await client.request("GET", "/v1/diagnosticSignatures/s1/logs", {
+      accept: "application/vnd.apple.diagnostic-logs+json",
+    });
+
+    expect((callInit(fetchImpl).headers as Record<string, string>).Accept).toBe(
+      "application/vnd.apple.diagnostic-logs+json",
+    );
+  });
+});

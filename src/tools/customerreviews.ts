@@ -13,6 +13,7 @@ import {
   summarizeResource,
   summarizeResponse,
 } from "#/client/shape";
+import { toAlpha2 } from "#/tools/territories";
 import {
   appIdArg,
   compact,
@@ -68,6 +69,108 @@ const currentReply = async (
   return typeof reply.id === "string" ? reply : undefined;
 };
 
+/** The public storefront lookup. Unauthenticated; see `getPublicJson`. */
+const LOOKUP_URL = "https://itunes.apple.com/lookup";
+
+/** Storefronts read when the caller names none, and the most one call will read. */
+const DEFAULT_TERRITORY_COUNT = 10;
+const MAX_TERRITORIES = 50;
+
+const RATING_SOURCE_NOTE =
+  "Public data from Apple's iTunes Lookup API, not from App Store Connect: what a customer's " +
+  "store page shows, cached by Apple (it can lag the store by hours) and possibly rounded, so " +
+  "treat small differences as noise. Counts include star-only ratings, which " +
+  "app_store_connect_list_customer_reviews never sees. There is no per-star breakdown here. " +
+  "`currentVersion` is NOT the ratings given to that version alone: the summary carries over " +
+  "from version to version, so it matches the overall figures unless the summary was reset " +
+  "when that version was released. " +
+  "NO_RATINGS means the app is on that storefront with no rating shown yet; " +
+  "NOT_ON_STOREFRONT means the lookup did not find the app there at all (not sold there, or " +
+  "not indexed yet); ERROR means the lookup itself failed and says nothing about ratings.";
+
+type StorefrontRating = Rec & {
+  territory: string;
+  status: "RATED" | "NO_RATINGS" | "NOT_ON_STOREFRONT" | "ERROR";
+};
+
+const num = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+/** One storefront's rating, keeping "nothing to show" apart from "could not ask". */
+const lookupRating = async (
+  client: AppStoreConnectClient,
+  appId: string,
+  territory: string,
+): Promise<StorefrontRating> => {
+  const country = toAlpha2(territory);
+  if (country === undefined) {
+    return { territory, status: "ERROR", error: `Unknown territory code "${territory}".` };
+  }
+  const url = `${LOOKUP_URL}?id=${encodeURIComponent(appId)}&country=${country.toLowerCase()}`;
+  let response: unknown;
+  try {
+    response = await client.getPublicJson(url);
+  } catch (err) {
+    return {
+      territory,
+      country,
+      status: "ERROR",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  const results = isRecord(response) && Array.isArray(response.results) ? response.results : [];
+  const app = results.find(isRecord);
+  if (app === undefined) return { territory, country, status: "NOT_ON_STOREFRONT" };
+
+  const average = num(app.averageUserRating);
+  const count = num(app.userRatingCount);
+  const currentAverage = num(app.averageUserRatingForCurrentVersion);
+  const currentCount = num(app.userRatingCountForCurrentVersion);
+  const rated = average !== undefined && count !== undefined && count > 0;
+  return {
+    territory,
+    country,
+    status: rated ? "RATED" : "NO_RATINGS",
+    ...(rated ? { averageUserRating: average, userRatingCount: count } : {}),
+    ...(currentAverage !== undefined || currentCount !== undefined
+      ? {
+          currentVersion: compact({
+            version: app.version,
+            averageUserRating: currentAverage,
+            userRatingCount: currentCount,
+          }),
+        }
+      : {}),
+  };
+};
+
+/**
+ * The storefronts worth asking about when the caller names none: the ones its
+ * written reviews come from, most first. Asking all ~175 would trip the lookup
+ * API's rate limit, and a storefront nobody reviews in is rarely the question.
+ */
+const reviewedTerritories = async (
+  client: AppStoreConnectClient,
+  appId: string,
+): Promise<string[]> => {
+  const reviews = resourcesOf(
+    await client.get(`/v1/apps/${appId}/customerReviews`, {
+      "fields[customerReviews]": "territory",
+      sort: "-createdDate",
+      limit: 200,
+    }),
+  );
+  const counts = new Map<string, number>();
+  for (const review of reviews) {
+    const territory = attributesOf(review).territory;
+    if (typeof territory === "string") counts.set(territory, (counts.get(territory) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .toSorted((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, DEFAULT_TERRITORY_COUNT)
+    .map(([territory]) => territory);
+};
+
 export const registerCustomerReviewTools = (
   server: McpServer,
   client: AppStoreConnectClient,
@@ -84,7 +187,8 @@ export const registerCustomerReviewTools = (
         "that reply as `response` (body, state, last modified); a review without one has no " +
         "`response` key. Note these are written reviews only: " +
         "most people rate without writing, and Apple exposes no aggregate star average through " +
-        "this API, so a distribution computed from these is directional, not the App Store rating.",
+        "this API, so a distribution computed from these is directional, not the App Store rating. " +
+        "For the rating customers actually see, use app_store_connect_get_rating_summary.",
       inputSchema: z.object({
         appId: appIdArg,
         rating: z
@@ -125,6 +229,67 @@ export const registerCustomerReviewTools = (
           ),
         ),
       ),
+  );
+
+  server.registerTool(
+    "app_store_connect_get_rating_summary",
+    {
+      title: "App Store Connect: Get Rating Summary",
+      description:
+        "Get the star rating customers see on the App Store, per storefront: the average and " +
+        "the number of ratings (star-only ones included), plus the current version's own figures " +
+        "where Apple publishes them. App Store Connect's API has no aggregate rating, so this " +
+        "reads Apple's PUBLIC iTunes Lookup API instead: cached, possibly rounded, and no " +
+        "per-star breakdown. It is the input for deciding whether resetting the rating summary " +
+        "is worth it (that reset itself is web-only; see app_store_connect_update_version). " +
+        "Each storefront has a `status`: RATED, NO_RATINGS (on sale there, nothing shown yet), " +
+        "NOT_ON_STOREFRONT (the lookup did not find the app there), or ERROR (the lookup failed, " +
+        "which says nothing about ratings). Omit `territories` to read the storefronts the app's " +
+        `latest written reviews come from (top ${DEFAULT_TERRITORY_COUNT}, USA when there are ` +
+        "none); the response says which were read and why.",
+      inputSchema: z.object({
+        appId: appIdArg,
+        territories: z
+          .array(territoryArg)
+          .min(1)
+          .max(MAX_TERRITORIES)
+          .optional()
+          .describe(
+            'Storefronts to read (ISO-3166-1 alpha-3), e.g. ["USA","FRA"]. At most ' +
+              `${MAX_TERRITORIES}. Omit to pick them from where the app's reviews come from.`,
+          ),
+        savePath: savePathArg,
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ appId, territories, savePath }) =>
+      wrapSaved(savePath, async () => {
+        let picked = territories?.map((t) => t.toUpperCase());
+        let territoriesFrom = "requested";
+        if (picked === undefined) {
+          const reviewed = await reviewedTerritories(client, appId);
+          picked = reviewed.length > 0 ? reviewed : ["USA"];
+          territoriesFrom =
+            reviewed.length > 0
+              ? `the ${reviewed.length} storefront(s) with the most of the app's latest 200 ` +
+                `written reviews; ratings in other storefronts were not read`
+              : "USA, because the app has no written reviews to pick storefronts from";
+        }
+        const unique = [...new Set(picked)];
+        // Sequential: the lookup API rate-limits per caller, and ten storefronts
+        // a second apart is still a fast answer.
+        const storefronts: StorefrontRating[] = [];
+        for (const territory of unique) {
+          storefronts.push(await lookupRating(client, appId, territory));
+        }
+        return {
+          appId,
+          source: "itunes-lookup",
+          territoriesFrom,
+          storefronts,
+          note: RATING_SOURCE_NOTE,
+        };
+      }),
   );
 
   if (!allowWrites) return;

@@ -205,3 +205,136 @@ describe("customer review replies", () => {
     expect(deleteCall(fetchImpl)).toBeUndefined();
   });
 });
+
+describe("get_rating_summary", () => {
+  const APP_ID = "1234567890";
+
+  const lookup = (results: unknown[]): Response =>
+    new Response(JSON.stringify({ resultCount: results.length, results }), {
+      status: 200,
+      headers: { "content-type": "text/javascript" },
+    });
+
+  /** iTunes answers per storefront; the ASC host answers the review listing. */
+  const routed = (
+    storefronts: Record<string, Response | (() => Response)>,
+    reviews: unknown[] = [],
+  ): ReturnType<typeof vi.fn> =>
+    vi.fn(async (url: string) => {
+      const u = new URL(url);
+      if (u.hostname === "itunes.apple.com") {
+        const entry = storefronts[u.searchParams.get("country") ?? ""];
+        if (entry === undefined) return lookup([]);
+        return typeof entry === "function" ? entry() : entry.clone();
+      }
+      return jsonResponse({ data: reviews });
+    });
+
+  const call = async (
+    fetchImpl: ReturnType<typeof vi.fn>,
+    args: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> => {
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_get_rating_summary",
+      arguments: { appId: APP_ID, ...args },
+    });
+    expect(result.isError).toBeFalsy();
+    return payloadOf(result);
+  };
+
+  it("converts alpha-3 territories to the lookup's alpha-2 storefronts", async () => {
+    const fetchImpl = routed({
+      fr: lookup([
+        {
+          trackId: 1234567890,
+          version: "1.3.1",
+          averageUserRating: 3.2,
+          userRatingCount: 41,
+          averageUserRatingForCurrentVersion: 1.5,
+          userRatingCountForCurrentVersion: 2,
+        },
+      ]),
+    });
+
+    const body = await call(fetchImpl, { territories: ["FRA"] });
+
+    const url = new URL(callArgs(fetchImpl)[0]);
+    expect(url.origin + url.pathname).toBe("https://itunes.apple.com/lookup");
+    expect(url.searchParams.get("id")).toBe(APP_ID);
+    expect(url.searchParams.get("country")).toBe("fr");
+    expect(body.storefronts).toEqual([
+      {
+        territory: "FRA",
+        country: "FR",
+        status: "RATED",
+        averageUserRating: 3.2,
+        userRatingCount: 41,
+        currentVersion: { version: "1.3.1", averageUserRating: 1.5, userRatingCount: 2 },
+      },
+    ]);
+    expect(String(body.note)).toContain("cached");
+  });
+
+  // "No ratings here" and "could not ask" lead to opposite decisions.
+  it("keeps no ratings, not on the storefront, and a failed lookup distinct", async () => {
+    const fetchImpl = routed({
+      us: lookup([{ trackId: 1, userRatingCount: 0, averageUserRating: 0 }]),
+      de: lookup([]),
+      jp: () => new Response("busy", { status: 403 }),
+    });
+
+    const body = await call(fetchImpl, { territories: ["USA", "DEU", "JPN"] });
+
+    const byTerritory = Object.fromEntries(
+      (body.storefronts as Record<string, unknown>[]).map((s) => [s.territory, s]),
+    );
+    expect(byTerritory.USA).toMatchObject({ status: "NO_RATINGS" });
+    expect(byTerritory.USA).not.toHaveProperty("averageUserRating");
+    expect(byTerritory.DEU).toMatchObject({ status: "NOT_ON_STOREFRONT" });
+    expect(byTerritory.JPN).toMatchObject({ status: "ERROR" });
+    expect(String(byTerritory.JPN?.error)).toContain("403");
+  });
+
+  it("reports an unknown territory code as an error without asking", async () => {
+    const fetchImpl = routed({});
+
+    const body = await call(fetchImpl, { territories: ["ZZZ"] });
+
+    expect(body.storefronts).toEqual([
+      expect.objectContaining({ territory: "ZZZ", status: "ERROR" }),
+    ]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("defaults to the storefronts the latest written reviews come from", async () => {
+    const review = (territory: string): unknown => ({
+      type: "customerReviews",
+      id: `r-${territory}-${Math.random()}`,
+      attributes: { territory },
+    });
+    const fetchImpl = routed({}, [review("FRA"), review("FRA"), review("BEL"), review("FRA")]);
+
+    const body = await call(fetchImpl);
+
+    const reviewsUrl = new URL(callArgs(fetchImpl, 0)[0]);
+    expect(reviewsUrl.pathname).toBe(`/v1/apps/${APP_ID}/customerReviews`);
+    const countries = fetchImpl.mock.calls
+      .map((c) => new URL(String(c[0])))
+      .filter((u) => u.hostname === "itunes.apple.com")
+      .map((u) => u.searchParams.get("country"));
+    expect(countries).toEqual(["fr", "be"]);
+    expect(String(body.territoriesFrom)).toContain("not read");
+  });
+
+  it("falls back to USA for an app with no written reviews, and says so", async () => {
+    const fetchImpl = routed({});
+
+    const body = await call(fetchImpl);
+
+    expect((body.storefronts as Record<string, unknown>[])[0]).toMatchObject({
+      territory: "USA",
+    });
+    expect(String(body.territoriesFrom)).toContain("no written reviews");
+  });
+});

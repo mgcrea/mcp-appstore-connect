@@ -454,7 +454,8 @@ export const registerAnalyticsTools = (
         "which is the only honest answer to which period you got: an instance's processingDate " +
         "is when Apple GENERATED it, and a fresh ONE_TIME_SNAPSHOT reports today while holding a " +
         "year of history. Use app_store_connect_get_analytics_status first if the question is " +
-        'merely "is there any data yet". This tool does not create a report request — that is a ' +
+        'merely "is there any data yet". For crashes per version, device and OS, pass category ' +
+        'APP_USAGE and reportName "App Crashes". This tool does not create a report request — that is a ' +
         "write, and creating the wrong access type loses history permanently.",
       inputSchema: z.object({
         appId: appIdArg,
@@ -464,14 +465,21 @@ export const registerAnalyticsTools = (
             "Required — it decides WHICH numbers you get, and defaulting it would silently pick " +
               "a dataset out of ~106. APP_STORE_ENGAGEMENT covers impressions, product page " +
               "views and conversion; COMMERCE covers downloads and proceeds; APP_USAGE covers " +
-              "installs, deletions, sessions and retention.",
+              'installs, deletions, sessions, retention and crash counts ("App Crashes"); ' +
+              'PERFORMANCE holds "App Crashes Expanded".',
           ),
         reportName: z
           .string()
           .optional()
           .describe(
             'Exact report name, e.g. "App Store Purchases". Omit to let the category decide; ' +
-              "the response always says which was chosen and what else was available.",
+              "the response always says which was chosen and what else was available. For " +
+              'crashes over time: "App Crashes" (APP_USAGE; Date, App Version, Device, Platform ' +
+              "Version, Crashes, Unique Devices; worldwide only, no territory; crashes that " +
+              'produced a crash log) or "App Crashes Expanded" (PERFORMANCE, DAILY, iOS/iPadOS ' +
+              "only; every crash on device, with Territory and Build). Both count only devices " +
+              "whose owners share analytics, and drop rows under 5 users, so a missing row is " +
+              "not zero crashes.",
           ),
         detailed: z
           .boolean()

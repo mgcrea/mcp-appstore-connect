@@ -49,6 +49,19 @@ const EDITABLE_STATES = [
 /** The one state a manual release request applies to: approved, waiting on us. */
 const RELEASABLE_STATE = "PENDING_DEVELOPER_RELEASE";
 
+/**
+ * Apple's API has no switch for this (checked against the App Store Connect
+ * OpenAPI spec 4.6: nothing on appStoreVersions, appStoreVersionReleaseRequests
+ * or anywhere else), so the tools that would carry it say where it lives
+ * instead, which is all an agent can usefully do with the question.
+ */
+const RATING_RESET_NOTE =
+  "Resetting the rating summary is NOT possible through this API: it is web-only, in App Store " +
+  "Connect on the version's page, section App Store Version Release, checkbox \"Reset iPhone " +
+  'and iPad App Summary Rating". It takes effect when the version is released, cannot be ' +
+  "undone, applies in every territory, and wipes the good ratings along with the bad; read " +
+  "the current ones first with app_store_connect_get_rating_summary.";
+
 /** How an approved version reaches customers. */
 const RELEASE_TYPES = ["MANUAL", "AFTER_APPROVAL", "SCHEDULED"] as const;
 
@@ -326,7 +339,8 @@ export const registerVersionTools = (
         "Create a new App Store version for an app (e.g. start metadata for 1.3.0). The version " +
         "begins in PREPARE_FOR_SUBMISSION; attach a build with " +
         "app_store_connect_set_version_build, then hand it to Apple with " +
-        "app_store_connect_submit_version_for_review.",
+        "app_store_connect_submit_version_for_review. To roll it out over 7 days, add " +
+        `app_store_connect_create_phased_release before it is released. ${RATING_RESET_NOTE}`,
       inputSchema: z.object({
         appId: appIdArg,
         versionString: z.string().min(1).describe('The new version number, e.g. "1.3.0".'),
@@ -367,7 +381,7 @@ export const registerVersionTools = (
         "sets its copyright. Only the fields you pass are changed. The version must not be " +
         "submitted yet (PREPARE_FOR_SUBMISSION) or must be back after a rejection " +
         "(DEVELOPER_REJECTED, REJECTED, METADATA_REJECTED, INVALID_BINARY). To change a version's build instead, use " +
-        "app_store_connect_set_version_build.",
+        `app_store_connect_set_version_build. ${RATING_RESET_NOTE}`,
       inputSchema: z.object({
         versionId: versionIdArg,
         releaseType: releaseTypeArg.optional(),

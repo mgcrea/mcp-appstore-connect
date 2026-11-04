@@ -1,16 +1,31 @@
+import { join } from "node:path";
+
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
-import { summarizeResponse } from "#/client/shape";
+import {
+  attributesOf,
+  includedIndex,
+  type Rec,
+  relatedId,
+  resourceOf,
+  resourcesOf,
+  summarizeResource,
+  summarizeResponse,
+} from "#/client/shape";
 import {
   appIdArg,
   appIdsArg,
   compact,
   confirmArg,
+  getOrNull,
   limitArg,
+  PLATFORMS,
   PreconditionError,
+  saveToPath,
   savePathArg,
+  type SavedFile,
   summarizeWithApp,
   wrap,
   wrapSaved,
@@ -25,6 +40,54 @@ const testerIdArg = z
   .string()
   .min(1)
   .describe("The beta tester id (from app_store_connect_list_beta_testers).");
+
+const crashSubmissionIdArg = z
+  .string()
+  .min(1)
+  .describe("The betaFeedbackCrashSubmission id (from app_store_connect_list_beta_crash_reports).");
+
+/**
+ * The lines of a crash log that say what happened, so the caller can tell one
+ * crash from another without opening the file. Best effort: a log in a format
+ * these do not match just yields none.
+ */
+const HEADLINE =
+  /^(Exception Type|Exception Codes|Exception Reason|Termination Reason|Crashed Thread|Triggered by Thread):/;
+
+const headlineOf = (logText: string): string[] =>
+  logText
+    .split(/\r?\n/)
+    .filter((line) => HEADLINE.test(line.trim()))
+    .map((line) => line.trim())
+    .slice(0, 6);
+
+/**
+ * A submission's crash log, or `null` when Apple holds none for it. Apple says
+ * "none" as a 404 or as a 200 without `logText`, depending on the submission.
+ */
+const crashLogText = async (
+  client: AppStoreConnectClient,
+  submissionId: string,
+): Promise<string | null> => {
+  const log = resourceOf(
+    await getOrNull(client, `/v1/betaFeedbackCrashSubmissions/${submissionId}/crashLog`),
+  );
+  const text = attributesOf(log).logText;
+  return typeof text === "string" && text !== "" ? text : null;
+};
+
+/** Write one crash log verbatim and report what landed. */
+const saveCrashLog = async (
+  path: string,
+  logText: string,
+): Promise<{ saved: SavedFile; headline: string[] }> => ({
+  saved: { ...(await saveToPath(path, logText, "crash log")), content: "text" },
+  headline: headlineOf(logText),
+});
+
+const NO_CRASH_LOG =
+  "Apple holds no crash log for this submission. The tester's report still counts; the log " +
+  "may simply not have been uploaded from the device.";
 
 export const registerTestflightTools = (
   server: McpServer,
@@ -88,8 +151,10 @@ export const registerTestflightTools = (
     {
       title: "App Store Connect: List Beta Feedback",
       description:
-        "List TestFlight beta feedback screenshot submissions for an app (tester comment, device " +
-        "model, OS version, and screenshot asset links).",
+        "List TestFlight beta feedback SCREENSHOT submissions for an app (tester comment, device " +
+        "model, OS version, and screenshot asset links). Crash reports testers sent are not " +
+        "here: they are app_store_connect_list_beta_crash_reports. An empty list here says " +
+        "nothing about crashes.",
       inputSchema: z.object({ appId: appIdArg, limit: limitArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
@@ -102,6 +167,123 @@ export const registerTestflightTools = (
           ),
         ),
       ),
+  );
+
+  server.registerTool(
+    "app_store_connect_list_beta_crash_reports",
+    {
+      title: "App Store Connect: List Beta Crash Reports",
+      description:
+        "List the crash reports TestFlight testers submitted for an app, newest first: date, " +
+        "tester comment and email, device model and family, OS version, platform, architecture, " +
+        "app uptime, and the build (`buildId`, `buildNumber`). Pass `crashLogDir` to also save " +
+        "each report's crash log there as <submissionId>.crash, or fetch one with " +
+        "app_store_connect_get_beta_crash_log. These are only crashes a TESTER chose to send " +
+        "from TestFlight: not every crash, and nothing from App Store customers. Crash counts " +
+        'for released versions are the "App Crashes" report in ' +
+        "app_store_connect_get_analytics_report, and App Store crash logs are only in Xcode " +
+        "Organizer or Xcode's MCP (GetTopCrashIssues). An empty list does not mean the build " +
+        "does not crash.",
+      inputSchema: z.object({
+        appId: appIdArg,
+        buildId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Only reports from this build (from app_store_connect_list_builds)."),
+        platform: z.enum(PLATFORMS).optional().describe("Only reports for this app platform."),
+        limit: limitArg,
+        crashLogDir: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Absolute directory to save each listed report's crash log to, as " +
+              "<submissionId>.crash. One extra request per report. Omit to list only.",
+          ),
+        savePath: savePathArg,
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ appId, buildId, platform, limit, crashLogDir, savePath }) =>
+      wrapSaved(savePath, async () => {
+        const response = await client.get(
+          `/v1/apps/${appId}/betaFeedbackCrashSubmissions`,
+          compact({
+            "filter[build]": buildId,
+            "filter[appPlatform]": platform,
+            include: "build",
+            "fields[builds]": "version,uploadedDate",
+            sort: "-createdDate",
+            limit,
+          }),
+        );
+        const builds = includedIndex(response, "builds");
+        const submissions = resourcesOf(response);
+        // Sequential on purpose: one request per report, and a page of 200 fired
+        // at once is a 429 waiting to happen.
+        const logs: (Rec | undefined)[] = [];
+        for (const submission of submissions) {
+          if (crashLogDir === undefined) {
+            logs.push(undefined);
+            continue;
+          }
+          const id = String(submission.id);
+          const text = await crashLogText(client, id);
+          logs.push(
+            text === null
+              ? { crashLog: null }
+              : { crashLog: await saveCrashLog(join(crashLogDir, `${id}.crash`), text) },
+          );
+        }
+        const summary = summarizeResponse(response) as Rec;
+        return {
+          ...summary,
+          data: submissions.map((submission, index) => {
+            const id = relatedId(submission, "build");
+            const build = id === undefined ? undefined : builds.get(id);
+            return {
+              ...(summarizeResource(submission) as Rec),
+              buildId: id,
+              buildNumber: build === undefined ? undefined : attributesOf(build).version,
+              ...logs[index],
+            };
+          }),
+          ...(submissions.length === 0
+            ? {
+                note:
+                  "No tester sent a crash report through TestFlight for this filter. That is " +
+                  "not evidence the app does not crash: most crashes are never reported by hand.",
+              }
+            : {}),
+        };
+      }),
+  );
+
+  server.registerTool(
+    "app_store_connect_get_beta_crash_log",
+    {
+      title: "App Store Connect: Get Beta Crash Log",
+      description:
+        "Save the crash log of one TestFlight crash report to `savePath`, verbatim. The log is " +
+        "not inlined; the response carries the file receipt and its headline lines (exception " +
+        "type, termination reason, crashed thread) when the log has them. `crashLog: null` " +
+        "means Apple holds no log for that report, not that the report is invalid.",
+      inputSchema: z.object({
+        submissionId: crashSubmissionIdArg,
+        savePath: z
+          .string()
+          .min(1)
+          .describe("Absolute path to write the crash log to, e.g. /tmp/crash-1.crash. Required."),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ submissionId, savePath }) =>
+      wrap(async () => {
+        const text = await crashLogText(client, submissionId);
+        if (text === null) return { submissionId, crashLog: null, note: NO_CRASH_LOG };
+        return { submissionId, crashLog: await saveCrashLog(savePath, text) };
+      }),
   );
 
   if (!allowWrites) return;

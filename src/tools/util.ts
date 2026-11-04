@@ -78,11 +78,16 @@ export const wrap = async <T>(fn: () => Promise<T>): Promise<ToolResult> => {
 
 /**
  * What a save produced. `content` says how to read the file back: `json` is a
- * tool result, `report` a raw TSV/CSV, `binary` DER bytes. Downstream readers
+ * tool result, `report` a raw TSV/CSV, `binary` DER bytes, `text` a log written
+ * verbatim (a TestFlight crash log). Downstream readers
  * branch on it rather than guessing from the extension — `report_stats.py`
  * parses a `report` file as a table and must not try that on a `json` dump.
  */
-export type SavedFile = { path: string; bytes: number; content: "json" | "report" | "binary" };
+export type SavedFile = {
+  path: string;
+  bytes: number;
+  content: "json" | "report" | "binary" | "text";
+};
 
 /**
  * Write a file where the caller asked, and report what landed.

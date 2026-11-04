@@ -1,7 +1,20 @@
-import { Client } from "@modelcontextprotocol/client";
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { baseConfig, callArgs, connect, groupBody, jsonResponse, postCall } from "../helpers.js";
+import { Client } from "@modelcontextprotocol/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+  baseConfig,
+  callArgs,
+  connect,
+  groupBody,
+  jsonResponse,
+  notFound,
+  payloadOf,
+  postCall,
+} from "../helpers.js";
 
 describe("create_beta_group", () => {
   const APP_ID = "6798236186";
@@ -100,5 +113,147 @@ describe("list_beta_testers", () => {
     expect(url.pathname).toBe("/v1/betaTesters");
     expect(url.searchParams.get("filter[betaGroups]")).toBe("g1");
     expect(url.searchParams.get("filter[email]")).toBe("alice@example.com");
+  });
+});
+
+describe("beta crash reports", () => {
+  const APP_ID = "6798236186";
+  const LOG = [
+    "Incident Identifier: X",
+    "Exception Type:  EXC_CRASH (SIGABRT)",
+    "Termination Reason: SIGNAL 6 Abort trap: 6",
+    "Triggered by Thread:  0",
+    "Thread 0 Crashed:",
+  ].join("\n");
+
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "asc-crash-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const submission = (id: string, buildId: string): unknown => ({
+    type: "betaFeedbackCrashSubmissions",
+    id,
+    attributes: {
+      createdDate: "2026-11-04T10:00:00Z",
+      comment: "Crashed at launch",
+      deviceModel: "iPhone17,1",
+      osVersion: "26.1",
+    },
+    relationships: { build: { data: { type: "builds", id: buildId } } },
+  });
+
+  const routed = (logs: Record<string, string | null>): ReturnType<typeof vi.fn> =>
+    vi.fn(async (url: string) => {
+      const { pathname } = new URL(url);
+      const match = /betaFeedbackCrashSubmissions\/([^/]+)\/crashLog$/.exec(pathname);
+      if (match) {
+        const text = logs[match[1] as string];
+        return text === null || text === undefined
+          ? notFound()
+          : jsonResponse({
+              data: { type: "betaCrashLogs", id: "l", attributes: { logText: text } },
+            });
+      }
+      return jsonResponse({
+        data: [submission("c1", "b1"), submission("c2", "b1")],
+        included: [{ type: "builds", id: "b1", attributes: { version: "42" } }],
+      });
+    });
+
+  it("lists newest first with the build number resolved, filtered by build", async () => {
+    const fetchImpl = routed({});
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const result = await client.callTool({
+      name: "app_store_connect_list_beta_crash_reports",
+      arguments: { appId: APP_ID, buildId: "b1" },
+    });
+
+    expect(result.isError).toBeFalsy();
+    const url = new URL(callArgs(fetchImpl)[0]);
+    expect(url.pathname).toBe(`/v1/apps/${APP_ID}/betaFeedbackCrashSubmissions`);
+    expect(url.searchParams.get("filter[build]")).toBe("b1");
+    expect(url.searchParams.get("sort")).toBe("-createdDate");
+    expect(url.searchParams.get("include")).toBe("build");
+    const rows = payloadOf(result).data as Record<string, unknown>[];
+    expect(rows[0]).toMatchObject({
+      id: "c1",
+      comment: "Crashed at launch",
+      deviceModel: "iPhone17,1",
+      osVersion: "26.1",
+      buildId: "b1",
+      buildNumber: "42",
+    });
+    // Listing alone never fetches logs.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves each crash log to crashLogDir, and marks a missing one null", async () => {
+    const fetchImpl = routed({ c1: LOG, c2: null });
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const result = await client.callTool({
+      name: "app_store_connect_list_beta_crash_reports",
+      arguments: { appId: APP_ID, crashLogDir: dir },
+    });
+
+    expect(result.isError).toBeFalsy();
+    const rows = payloadOf(result).data as Record<string, unknown>[];
+    expect(rows[0]?.crashLog).toMatchObject({
+      saved: { path: join(dir, "c1.crash"), content: "text" },
+      headline: [
+        "Exception Type:  EXC_CRASH (SIGABRT)",
+        "Termination Reason: SIGNAL 6 Abort trap: 6",
+        "Triggered by Thread:  0",
+      ],
+    });
+    expect(rows[1]?.crashLog).toBeNull();
+    expect(await readFile(join(dir, "c1.crash"), "utf8")).toBe(LOG);
+  });
+
+  it("says an empty list is not evidence of no crashes", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ data: [] }));
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+
+    const result = await client.callTool({
+      name: "app_store_connect_list_beta_crash_reports",
+      arguments: { appId: APP_ID },
+    });
+
+    expect(String(payloadOf(result).note)).toContain("not evidence");
+  });
+
+  it("get_beta_crash_log writes the log verbatim and inlines only its headline", async () => {
+    const fetchImpl = routed({ c1: LOG });
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    const savePath = join(dir, "one.crash");
+
+    const result = await client.callTool({
+      name: "app_store_connect_get_beta_crash_log",
+      arguments: { submissionId: "c1", savePath },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(new URL(callArgs(fetchImpl)[0]).pathname).toBe(
+      "/v1/betaFeedbackCrashSubmissions/c1/crashLog",
+    );
+    expect(await readFile(savePath, "utf8")).toBe(LOG);
+    expect(JSON.stringify(payloadOf(result))).not.toContain("Incident Identifier");
+  });
+
+  it("get_beta_crash_log answers null, not an error, when Apple holds no log", async () => {
+    const client = await connect(baseConfig, routed({}) as unknown as typeof fetch);
+
+    const result = await client.callTool({
+      name: "app_store_connect_get_beta_crash_log",
+      arguments: { submissionId: "c9", savePath: join(dir, "none.crash") },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(payloadOf(result).crashLog).toBeNull();
   });
 });

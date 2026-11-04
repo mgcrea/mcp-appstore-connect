@@ -13,8 +13,10 @@ import { registerCategoryTools } from "#/tools/categories";
 import { registerCertificateTools } from "#/tools/certificates";
 import { registerCustomerReviewTools } from "#/tools/customerreviews";
 import { registerDeviceTools } from "#/tools/devices";
+import { registerDiagnosticTools } from "#/tools/diagnostics";
 import { registerIapTools } from "#/tools/iap";
 import { registerListingTools } from "#/tools/listing";
+import { registerPhasedReleaseTools } from "#/tools/phasedrelease";
 import { registerPortfolioTools } from "#/tools/portfolio";
 import { registerPreviewTools } from "#/tools/previews";
 import { registerPricingTools } from "#/tools/pricing";
@@ -67,6 +69,8 @@ export const registerTools = (
 
   registerAppTools(server, client, allowWrites);
   registerVersionTools(server, client, allowWrites);
+  // How a released version reaches people, so it sits with the version tools.
+  registerPhasedReleaseTools(server, client, allowWrites);
   // Registered next to the version tools, because the question it answers —
   // which binary each app ships today — is the one people reach for
   // list_versions and list_builds to answer, and get wrong.
@@ -87,6 +91,8 @@ export const registerTools = (
   registerScreenshotTools(server, client, allowWrites);
   registerPreviewTools(server, client, allowWrites);
   registerBuildTools(server, client, allowWrites);
+  // Per-build hang, disk-write and launch signatures: read-only, and per build.
+  registerDiagnosticTools(server, client);
   registerTestflightTools(server, client, allowWrites);
   registerReportTools(server, client, ctx);
   registerAnalyticsTools(server, client, ctx);
