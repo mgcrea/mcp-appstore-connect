@@ -728,6 +728,52 @@ describe("get_analytics_report", () => {
     ).toMatchObject({ reportId: "r-crash", reportName: "App Crashes" });
   });
 
+  // Filiation, live: both requests exist and App Sessions has data, while App
+  // Crashes is registered with no instance. The old note ("instances follow a
+  // request") sent an agent off to create a request Apple would reject.
+  it("says an empty report on a working request is not a missing request, nor zero", async () => {
+    const fetchImpl = walk({
+      reports: [
+        report("r-crash", "App Crashes", "APP_USAGE"),
+        report("r-sess", "App Sessions Standard", "APP_USAGE"),
+      ],
+      instances: { "r-sess": [instance("i-sess", "WEEKLY")] },
+    });
+
+    const body = payloadOf(
+      await call(fetchImpl, {
+        category: "APP_USAGE",
+        reportName: "App Crashes",
+        granularity: "WEEKLY",
+      }),
+    );
+
+    expect(body.reason).toBe("NO_INSTANCES_FOR_GRANULARITY");
+    const note = String(body.note);
+    expect(note).toContain("App Sessions Standard");
+    expect(note).toContain("the request is not what is missing");
+    expect(note).toContain("five users");
+    expect(note).toContain("NOT a count of zero");
+    expect(note).toContain("GetTopCrashIssues");
+    expect(note).not.toContain("a day or two");
+  });
+
+  it("keeps the wait-for-Apple note when no report has data yet", async () => {
+    const fetchImpl = walk({
+      reports: [
+        report("r-crash", "App Crashes", "APP_USAGE"),
+        report("r-sess", "App Sessions Standard", "APP_USAGE"),
+      ],
+    });
+
+    const body = payloadOf(
+      await call(fetchImpl, { category: "APP_USAGE", reportName: "App Crashes" }),
+    );
+
+    expect(String(body.note)).toContain("a day or two");
+    expect(String(body.note)).not.toContain("five users");
+  });
+
   it("names the crash reports in its description", async () => {
     const client = await connect(baseConfig);
     const tool = (await client.listTools()).tools.find(

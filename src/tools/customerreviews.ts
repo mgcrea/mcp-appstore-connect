@@ -20,6 +20,7 @@ import {
   confirmArg,
   getOrNull,
   limitArg,
+  RATING_RESET_WEB_ONLY,
   savePathArg,
   territoryArg,
   wrap,
@@ -241,7 +242,7 @@ export const registerCustomerReviewTools = (
         "where Apple publishes them. App Store Connect's API has no aggregate rating, so this " +
         "reads Apple's PUBLIC iTunes Lookup API instead: cached, possibly rounded, and no " +
         "per-star breakdown. It is the input for deciding whether resetting the rating summary " +
-        "is worth it (that reset itself is web-only; see app_store_connect_update_version). " +
+        `is worth it. ${RATING_RESET_WEB_ONLY} ` +
         "Each storefront has a `status`: RATED, NO_RATINGS (on sale there, nothing shown yet), " +
         "NOT_ON_STOREFRONT (the lookup did not find the app there), or ERROR (the lookup failed, " +
         "which says nothing about ratings). Omit `territories` to read the storefronts the app's " +
@@ -288,6 +289,7 @@ export const registerCustomerReviewTools = (
           territoriesFrom,
           storefronts,
           note: RATING_SOURCE_NOTE,
+          reset: RATING_RESET_WEB_ONLY,
         };
       }),
   );

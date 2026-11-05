@@ -286,6 +286,19 @@ export const versionIdArg = z
   .min(1)
   .describe("The appStoreVersion id (from app_store_connect_list_versions).");
 
+/**
+ * Where the rating-summary reset lives, said in full by every tool that touches
+ * the question. Apple's API has no field for it (spec 4.6: nothing on
+ * appStoreVersions, appStoreVersionReleaseRequests or anywhere else), and a
+ * pointer to another tool is not enough: the version tools are writes, hidden
+ * when writes are off, and a client can hold a stale copy of their description.
+ */
+export const RATING_RESET_WEB_ONLY =
+  "Resetting the rating summary is web-only, Apple's API has no field for it: App Store " +
+  "Connect, the version's page, section App Store Version Release, checkbox \"Reset iPhone " +
+  'and iPad App Summary Rating". It takes effect when the version is released, cannot be ' +
+  "undone, applies in every territory, and wipes the good ratings along with the bad.";
+
 /** Destructive tools require this, so an agent can never mutate something in passing. */
 export const confirmArg = z
   .literal(true)

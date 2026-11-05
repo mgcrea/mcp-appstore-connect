@@ -16,6 +16,7 @@ import {
   limitArg,
   PLATFORMS,
   PreconditionError,
+  RATING_RESET_WEB_ONLY,
   savePathArg,
   versionIdArg,
   wrap,
@@ -49,18 +50,9 @@ const EDITABLE_STATES = [
 /** The one state a manual release request applies to: approved, waiting on us. */
 const RELEASABLE_STATE = "PENDING_DEVELOPER_RELEASE";
 
-/**
- * Apple's API has no switch for this (checked against the App Store Connect
- * OpenAPI spec 4.6: nothing on appStoreVersions, appStoreVersionReleaseRequests
- * or anywhere else), so the tools that would carry it say where it lives
- * instead, which is all an agent can usefully do with the question.
- */
 const RATING_RESET_NOTE =
-  "Resetting the rating summary is NOT possible through this API: it is web-only, in App Store " +
-  "Connect on the version's page, section App Store Version Release, checkbox \"Reset iPhone " +
-  'and iPad App Summary Rating". It takes effect when the version is released, cannot be ' +
-  "undone, applies in every territory, and wipes the good ratings along with the bad; read " +
-  "the current ones first with app_store_connect_get_rating_summary.";
+  `${RATING_RESET_WEB_ONLY} Read the current ratings first with ` +
+  "app_store_connect_get_rating_summary.";
 
 /** How an approved version reaches customers. */
 const RELEASE_TYPES = ["MANUAL", "AFTER_APPROVAL", "SCHEDULED"] as const;

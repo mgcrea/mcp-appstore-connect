@@ -95,7 +95,7 @@ export const registerAnalyticsTools = (
           .optional()
           .describe(
             "Filter by category. APP_STORE_ENGAGEMENT covers impressions, product page views and " +
-              "conversion; APP_USAGE covers installs, sessions and retention; COMMERCE covers " +
+              "conversion; APP_USAGE covers installs, sessions, retention and crashes; COMMERCE covers " +
               "sales and proceeds.",
           ),
         name: z
@@ -318,7 +318,7 @@ export const registerAnalyticsTools = (
           .optional()
           .describe(
             "Restrict to one category. APP_STORE_ENGAGEMENT covers impressions, product page " +
-              "views and conversion; APP_USAGE covers installs, sessions and retention; COMMERCE " +
+              "views and conversion; APP_USAGE covers installs, sessions, retention and crashes; COMMERCE " +
               "covers sales and proceeds.",
           ),
         includeFrameworkUsage: z
@@ -672,6 +672,41 @@ export const registerAnalyticsTools = (
             accessType === undefined && wantedAccess !== undefined
               ? beforeAccess.filter((report) => !candidates.includes(report) && hasInstance(report))
               : [];
+          // Whether the app's requests are producing data at all. When other
+          // reports have instances, the request is not what is missing, and
+          // "instances follow a day or two after a request" sent an agent off
+          // to create one Apple would reject (Filiation: App Sessions had data,
+          // App Crashes had none, on both requests).
+          const wantedNames = new Set(candidates.map((r) => String(attributesOf(r).name ?? "")));
+          const otherReportsWithData = [
+            ...new Set(
+              walk.probed
+                .filter(hasInstance)
+                .map((r) => String(attributesOf(r).name ?? ""))
+                .filter((name) => !wantedNames.has(name)),
+            ),
+          ].toSorted();
+          const crashReport = [...wantedNames].some((name) => /crash/i.test(name));
+          const where =
+            `No ${granularity} instance exists for the report(s) matching this request` +
+            (processingDate === undefined ? "" : ` on processingDate ${processingDate}`) +
+            ".";
+          const why =
+            candidates.length > 0 && otherReportsWithData.length > 0
+              ? ` The app's report requests (${walk.accessTypes.map(String).join(", ")}) are ` +
+                `already producing data (${otherReportsWithData.slice(0, 3).join(", ")} ` +
+                `${otherReportsWithData.length === 1 ? "has" : "have"} ${granularity} ` +
+                `instances), so the request is not what is missing and creating another will ` +
+                `not help: Apple rejects a second ONGOING one. Apple only publishes a row when at ` +
+                `least five users contributed to it, so a report for a small app can stay empty ` +
+                `for good. Empty is NOT a count of zero.` +
+                (crashReport
+                  ? " Crash data still exists outside this API: Xcode Organizer, or Xcode's MCP " +
+                    "(GetTopCrashIssues)."
+                  : "")
+              : " Not every report offers all three granularities, and Apple generates " +
+                "instances a day or two after a request is created. Try another granularity, or " +
+                "app_store_connect_get_analytics_status to see what does exist.";
           return {
             empty: true,
             reason: candidates.length === 0 ? "NO_MATCHING_REPORT" : "NO_INSTANCES_FOR_GRANULARITY",
@@ -680,11 +715,8 @@ export const registerAnalyticsTools = (
             reportsProbed: walk.probed.length,
             reportsTotal: walk.reports.length,
             note:
-              `No ${granularity} instance exists for the report(s) matching this request` +
-              (processingDate === undefined ? "" : ` on processingDate ${processingDate}`) +
-              ". Not every report offers all three granularities, and Apple generates instances " +
-              "a day or two after a request is created. Try another granularity, or " +
-              "app_store_connect_get_analytics_status to see what does exist." +
+              where +
+              why +
               (walk.probed.length < walk.reports.length
                 ? ` Only ${walk.probed.length} of ${walk.reports.length} reports were probed, so ` +
                   `this is a floor — raise maxReportsProbed.`

@@ -296,6 +296,22 @@ describe("get_rating_summary", () => {
     expect(String(byTerritory.JPN?.error)).toContain("403");
   });
 
+  // update_version is a write tool, hidden when writes are off, so a pointer to
+  // it can lead nowhere: the reset's location has to be stated here.
+  it("states where the web-only reset is, in its description and its result", async () => {
+    const client = await connect(baseConfig);
+    const description =
+      (await client.listTools()).tools.find(
+        (t) => t.name === "app_store_connect_get_rating_summary",
+      )?.description ?? "";
+    expect(description).toContain("App Store Version Release");
+    expect(description).toContain("Reset iPhone and iPad App Summary Rating");
+    expect(description).not.toContain("app_store_connect_update_version");
+
+    const body = await call(routed({}), { territories: ["USA"] });
+    expect(String(body.reset)).toContain("App Store Version Release");
+  });
+
   it("reports an unknown territory code as an error without asking", async () => {
     const fetchImpl = routed({});
 
