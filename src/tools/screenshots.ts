@@ -17,7 +17,9 @@ import { compact, confirmArg, limitArg, savePathArg, wrap, wrapSaved } from "#/t
  * Apple's ScreenshotDisplayType enum (spec 3.2). Hardcoded rather than accepted
  * as a free string so a typo fails zod validation here instead of surfacing as
  * an opaque 409 three network round-trips later. A new Apple device family
- * means a release of this package.
+ * means a release of this package. Apple deprecated screenshot sets in API 4.5.1;
+ * device families added since (iPhone Duo) exist only in the asset library
+ * (src/tools/assetlibrary.ts), which reads them at runtime instead.
  */
 const SCREENSHOT_DISPLAY_TYPES = [
   "APP_IPHONE_67",
@@ -264,7 +266,10 @@ export const registerScreenshotTools = (
     {
       title: "App Store Connect: Upload Screenshot",
       description:
-        "Upload a screenshot image to an App Store version localization. Runs the whole upload " +
+        "Upload a screenshot image to an App Store version localization, through the screenshot " +
+        "sets Apple deprecated in API 4.5.1 (still served). iPhone Duo screenshots and the iOS 27 " +
+        "creative assets have no set: use app_store_connect_upload_library_asset for those, and " +
+        "for new work. Runs the whole upload " +
         "flow: finds or creates the set for the device type, reserves the asset, uploads the " +
         "bytes, commits the checksum, then waits for processing. App Store Connect validates " +
         "image dimensions during processing, so a wrongly-sized image fails here with the exact " +

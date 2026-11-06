@@ -6,6 +6,7 @@ import { isConfigured, type Config } from "#/config";
 import { registerAnalyticsTools } from "#/tools/analytics";
 import { registerAppInfoTools } from "#/tools/appinfos";
 import { registerAppTools } from "#/tools/apps";
+import { registerAssetLibraryTools } from "#/tools/assetlibrary";
 import { registerAssetPackTools } from "#/tools/assetpacks";
 import { registerBuildTools } from "#/tools/builds";
 import { registerBundleIdTools } from "#/tools/bundleids";
@@ -90,6 +91,9 @@ export const registerTools = (
   registerListingTools(server, client, ctx);
   registerScreenshotTools(server, client, allowWrites);
   registerPreviewTools(server, client, allowWrites);
+  // The asset library supersedes both (API 4.5.1), and is the only route for
+  // iPhone Duo and the iOS 27 creative assets, so it sits right after them.
+  registerAssetLibraryTools(server, client, allowWrites);
   registerBuildTools(server, client, allowWrites);
   // Per-build hang, disk-write and launch signatures: read-only, and per build.
   registerDiagnosticTools(server, client);

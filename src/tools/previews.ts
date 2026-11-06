@@ -302,7 +302,9 @@ export const registerPreviewTools = (
     {
       title: "App Store Connect: Upload App Preview",
       description:
-        "Upload an app preview video to an App Store version localization. Runs the whole " +
+        "Upload an app preview video to an App Store version localization, through the preview " +
+        "sets Apple deprecated in API 4.5.1 (still served). An iPhone Duo preview or a header " +
+        "or search-results video needs app_store_connect_upload_library_asset instead. Runs the whole " +
         "upload flow: finds or creates the set for the device type, reserves the asset, uploads " +
         "the bytes, commits the checksum, then waits for processing and, if asked, sets the " +
         "poster frame. App Store Connect checks the video (resolution, frame rate, 15 to 30 s " +

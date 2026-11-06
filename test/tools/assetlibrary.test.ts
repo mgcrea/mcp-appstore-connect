@@ -1,0 +1,364 @@
+import { statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import { describe, expect, it, vi } from "vitest";
+
+import { baseConfig, connect, jsonResponse, payloadOf, textOf } from "../helpers.js";
+
+const FIXTURE_PATH = fileURLToPath(new URL("../fixtures/screenshot.png", import.meta.url));
+const FIXTURE_SIZE = statSync(FIXTURE_PATH).size;
+const UPLOAD_HOST = "https://upload.appstoreconnect.example";
+const writes = { ...baseConfig, allowWrites: true };
+
+const errorResponse = (status: number, code: string): Response =>
+  new Response(JSON.stringify({ errors: [{ status: String(status), code, detail: code }] }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+
+/** Reference data for APP_SCREENSHOT: two iPhone groups, each taking one spec. */
+const refData = {
+  data: [
+    {
+      id: "ref",
+      type: "appAssetLibraryRefData",
+      attributes: {
+        placementTypes: [
+          {
+            placementTypeId: "APP_SCREENSHOT",
+            acceptsAssetCategories: ["APP_SCREENSHOTS_AND_PREVIEWS"],
+            specMappings: [
+              { placementGroupId: "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE", specs: ["SPEC_69"] },
+              { placementGroupId: "IPHONE_DUO_PROFILE", specs: ["SPEC_DUO_INNER"] },
+            ],
+          },
+        ],
+      },
+    },
+  ],
+};
+
+type Route = (url: URL, init: RequestInit) => Response | undefined;
+
+/**
+ * A stub App Store Connect that answers by method and path, and records every
+ * call. Unrouted requests fail the test loudly instead of returning `{data: []}`.
+ */
+const stub = (routes: Route[]) =>
+  vi.fn(async (input: string | URL, init: RequestInit = {}) => {
+    const url = new URL(String(input));
+    for (const route of routes) {
+      const res = route(url, init);
+      if (res) return res;
+    }
+    throw new Error(`unrouted ${init.method ?? "GET"} ${url.pathname}${url.search}`);
+  });
+
+const on =
+  (method: string, path: string | RegExp, respond: (url: URL, init: RequestInit) => Response) =>
+  (url: URL, init: RequestInit): Response | undefined =>
+    (init.method ?? "GET") === method &&
+    (typeof path === "string" ? url.pathname === path : path.test(url.pathname))
+      ? respond(url, init)
+      : undefined;
+
+type Call = [string, RequestInit];
+const callsOf = (fetchImpl: ReturnType<typeof vi.fn>): Call[] =>
+  fetchImpl.mock.calls as unknown as Call[];
+const bodyOf = (call: Call | undefined): Record<string, any> =>
+  JSON.parse(String(call?.[1].body ?? "{}")) as Record<string, any>;
+const find = (
+  fetchImpl: ReturnType<typeof vi.fn>,
+  method: string,
+  path: string,
+): Call | undefined =>
+  callsOf(fetchImpl).find(
+    ([url, init]) => (init.method ?? "GET") === method && new URL(url).pathname === path,
+  );
+
+/** The routes every upload of `img-1` into `lib-1` takes, with a final state. */
+const uploadRoutes = (finalAttributes: Record<string, unknown>): Route[] => [
+  on("GET", "/v1/appAssetLibraryRefData", () => jsonResponse(refData)),
+  on("GET", "/v1/apps/app-1/assetLibrary", () =>
+    jsonResponse({ data: { id: "lib-1", type: "appAssetLibraries" } }),
+  ),
+  on("POST", "/v1/appAssetLibraryImages", () =>
+    jsonResponse({
+      data: {
+        id: "img-1",
+        type: "appAssetLibraryImages",
+        attributes: {
+          state: "AWAITING_UPLOAD",
+          uploadOperations: [
+            { method: "PUT", url: `${UPLOAD_HOST}/part-1`, offset: 0, length: FIXTURE_SIZE },
+          ],
+        },
+      },
+    }),
+  ),
+  (url, init) =>
+    url.origin === UPLOAD_HOST && init.method === "PUT" ? new Response(null) : undefined,
+  on("PATCH", "/v1/appAssetLibraryImages/img-1", () =>
+    jsonResponse({ data: { id: "img-1", type: "appAssetLibraryImages" } }),
+  ),
+  on("GET", "/v1/appAssetLibraryImages/img-1", () =>
+    jsonResponse({
+      data: { id: "img-1", type: "appAssetLibraryImages", attributes: finalAttributes },
+    }),
+  ),
+  on("POST", "/v1/appAssetLibraryPlacements", () =>
+    jsonResponse({
+      data: {
+        id: "pl-1",
+        type: "appAssetLibraryPlacements",
+        attributes: { state: "PARENT_PREPARE_FOR_SUBMISSION" },
+      },
+    }),
+  ),
+];
+
+const uploadArgs = {
+  appId: "app-1",
+  filePath: FIXTURE_PATH,
+  localizationId: "loc-1",
+  placementType: "APP_SCREENSHOT",
+  placementGroup: "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE",
+};
+
+describe("asset library upload", () => {
+  it("reserves in the library, commits without a checksum, waits, then places", async () => {
+    const fetchImpl = stub(
+      uploadRoutes({ state: "PREPARE_FOR_SUBMISSION", specId: "SPEC_69", category: "x" }),
+    );
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_upload_library_asset",
+      arguments: uploadArgs,
+    });
+
+    expect(result.isError, textOf(result)).toBeFalsy();
+    const reserve = bodyOf(find(fetchImpl, "POST", "/v1/appAssetLibraryImages")).data;
+    // The category comes from what the placement type accepts.
+    expect(reserve.attributes.category).toBe("APP_SCREENSHOTS_AND_PREVIEWS");
+    expect(reserve.attributes.fileName).toBe("screenshot.png");
+    expect(reserve.relationships.assetLibrary.data).toEqual({
+      type: "appAssetLibraries",
+      id: "lib-1",
+    });
+    // The asset library dropped the checksum: `uploaded: true` and nothing else.
+    expect(
+      bodyOf(find(fetchImpl, "PATCH", "/v1/appAssetLibraryImages/img-1")).data.attributes,
+    ).toEqual({ uploaded: true });
+    const placement = bodyOf(find(fetchImpl, "POST", "/v1/appAssetLibraryPlacements")).data;
+    expect(placement.attributes).toEqual({
+      placementType: "APP_SCREENSHOT",
+      placementGroup: "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE",
+    });
+    expect(placement.relationships).toEqual({
+      image: { data: { type: "appAssetLibraryImages", id: "img-1" } },
+      appStoreVersionLocalization: { data: { type: "appStoreVersionLocalizations", id: "loc-1" } },
+    });
+    const payload = payloadOf(result);
+    expect(payload.specId).toBe("SPEC_69");
+    expect(payload.placement).toMatchObject({ data: { id: "pl-1" } });
+  });
+
+  it("refuses an unknown placement group before uploading anything", async () => {
+    const fetchImpl = stub(uploadRoutes({ state: "PREPARE_FOR_SUBMISSION" }));
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_upload_library_asset",
+      arguments: { ...uploadArgs, placementGroup: "APP_IPHONE_67" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("IPHONE_DUO_PROFILE, IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE");
+    expect(find(fetchImpl, "POST", "/v1/appAssetLibraryImages")).toBeUndefined();
+  });
+
+  it("does not place an asset whose matched spec the group does not take", async () => {
+    const fetchImpl = stub(
+      uploadRoutes({ state: "PREPARE_FOR_SUBMISSION", specId: "SPEC_HEADER" }),
+    );
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_upload_library_asset",
+      arguments: uploadArgs,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("SPEC_HEADER");
+    expect(textOf(result)).toContain("SPEC_69");
+    expect(find(fetchImpl, "POST", "/v1/appAssetLibraryPlacements")).toBeUndefined();
+  });
+
+  it("names the delete tool when processing fails", async () => {
+    const fetchImpl = stub(
+      uploadRoutes({
+        state: "FAILED",
+        stateDetails: [{ code: "IMAGE_INCORRECT_DIMENSIONS", description: "wrong size" }],
+      }),
+    );
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_upload_library_asset",
+      arguments: uploadArgs,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("IMAGE_INCORRECT_DIMENSIONS");
+    expect(textOf(result)).toContain("app_store_connect_delete_library_asset");
+  });
+
+  it("asks for all three placement arguments or none", async () => {
+    const fetchImpl = stub([]);
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_upload_library_asset",
+      arguments: { appId: "app-1", filePath: FIXTURE_PATH, localizationId: "loc-1" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("all three");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("asset library placements", () => {
+  const groupRoute = on("GET", "/v1/appStoreVersionLocalizations/loc-1/placements", () =>
+    jsonResponse({
+      data: [
+        { id: "pl-a", type: "appAssetLibraryPlacements" },
+        { id: "pl-b", type: "appAssetLibraryPlacements" },
+      ],
+    }),
+  );
+
+  it("refuses an order that leaves a placement out", async () => {
+    const fetchImpl = stub([groupRoute]);
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_reorder_placements",
+      arguments: {
+        localizationId: "loc-1",
+        placementGroup: "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE",
+        placementIds: ["pl-b"],
+        confirm: true,
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Missing: pl-a");
+    expect(find(fetchImpl, "POST", "/v1/appAssetLibraryPlacementOrderingRequests")).toBeUndefined();
+  });
+
+  it("posts an ordering request naming every placement in order", async () => {
+    const fetchImpl = stub([
+      groupRoute,
+      on(
+        "POST",
+        "/v1/appAssetLibraryPlacementOrderingRequests",
+        () => new Response(null, { status: 201 }),
+      ),
+    ]);
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_reorder_placements",
+      arguments: {
+        localizationId: "loc-1",
+        placementGroup: "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE",
+        placementIds: ["pl-b", "pl-a"],
+        confirm: true,
+      },
+    });
+
+    expect(result.isError, textOf(result)).toBeFalsy();
+    const body = bodyOf(
+      find(fetchImpl, "POST", "/v1/appAssetLibraryPlacementOrderingRequests"),
+    ).data;
+    expect(body.attributes).toEqual({ placementGroup: "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE" });
+    expect(body.relationships.orderedPlacements.data.map((p: { id: string }) => p.id)).toEqual([
+      "pl-b",
+      "pl-a",
+    ]);
+    expect(body.relationships.appStoreVersionLocalization.data.id).toBe("loc-1");
+  });
+
+  it("lists placements with the file behind each one", async () => {
+    const fetchImpl = stub([
+      on("GET", "/v1/appStoreVersionLocalizations/loc-1/placements", (url) => {
+        expect(url.searchParams.get("sort")).toBe("placementGroupPosition");
+        expect(url.searchParams.get("include")).toBe("image,video");
+        return jsonResponse({
+          data: [
+            {
+              id: "pl-a",
+              type: "appAssetLibraryPlacements",
+              attributes: { placementType: "APP_SCREENSHOT", placementGroup: "G" },
+              relationships: { image: { data: { type: "appAssetLibraryImages", id: "img-1" } } },
+            },
+          ],
+          included: [
+            {
+              id: "img-1",
+              type: "appAssetLibraryImages",
+              attributes: { fileName: "01-fan~light.png", specId: "SPEC_69", state: "APPROVED" },
+            },
+          ],
+        });
+      }),
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_list_placements",
+      arguments: { localizationId: "loc-1" },
+    });
+
+    expect(result.isError, textOf(result)).toBeFalsy();
+    const rows = payloadOf(result).data as Record<string, any>[];
+    expect(rows[0]?.asset).toMatchObject({ id: "img-1", fileName: "01-fan~light.png" });
+  });
+
+  it("explains an asset that cannot be deleted while it is placed", async () => {
+    const fetchImpl = stub([
+      on("GET", "/v1/appAssetLibraryImages/img-1", () =>
+        jsonResponse({ data: { id: "img-1", type: "appAssetLibraryImages", attributes: {} } }),
+      ),
+      on("DELETE", "/v1/appAssetLibraryImages/img-1", () =>
+        errorResponse(409, "STATE_ERROR.ASSET_HAS_PLACEMENTS"),
+      ),
+      on("GET", "/v1/appAssetLibraryImages/img-1/placements", () =>
+        jsonResponse({ data: [{ id: "pl-a", type: "appAssetLibraryPlacements" }] }),
+      ),
+    ]);
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_delete_library_asset",
+      arguments: { assetId: "img-1", confirm: true },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("pl-a");
+    expect(textOf(result)).toContain("app_store_connect_delete_placement");
+  });
+
+  it("finds a video by id when it is not an image", async () => {
+    const fetchImpl = stub([
+      on("GET", "/v1/appAssetLibraryImages/vid-1", () => errorResponse(404, "NOT_FOUND")),
+      on("GET", "/v1/appAssetLibraryVideos/vid-1", () =>
+        jsonResponse({
+          data: { id: "vid-1", type: "appAssetLibraryVideos", attributes: { state: "APPROVED" } },
+        }),
+      ),
+      on("GET", "/v1/appAssetLibraryVideos/vid-1/placements", () => jsonResponse({ data: [] })),
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_get_library_asset",
+      arguments: { assetId: "vid-1" },
+    });
+
+    expect(result.isError, textOf(result)).toBeFalsy();
+    expect(payloadOf(result)).toMatchObject({ kind: "video", id: "vid-1", state: "APPROVED" });
+  });
+});
