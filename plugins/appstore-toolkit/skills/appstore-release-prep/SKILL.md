@@ -322,18 +322,49 @@ If the project generates its screenshots from a config, that config — not the 
 is the source of truth for the taglines baked into the images. Changing a tagline
 there means the PNGs are now stale; **say so**, since regenerating them is a separate
 step the user has to run. The `appshot-screenshot-pipeline` skill covers actually
-regenerating them, and `app_store_connect_list_screenshot_sets` will tell you whether the
-version has a complete set — an incomplete one blocks submission, and nothing in this
-audit can see it. A family image marked `[Mac listing slot]` is not in the Mac set's
-`appstore/` directory: it is written to `Screenshots/family/[<locale>/]` and uploaded to
-the Mac set by hand, so a regenerated one is stale on the store until someone does that.
-Say so when its caption changed.
+regenerating them. A family image with a slot in the Mac config's `screens[]` is
+composed into the Mac set's `appstore/` directory with the rest, numbered by its slot.
 
-An app preview is a separate upload too. `app_store_connect_list_preview_sets` shows what a
-version's localization carries, and a re-rendered preview reaches the store only through
-`app_store_connect_upload_preview` (up to three per display size and locale, 15 to 30 s
-each). Previews are optional, so a missing one never blocks submission; say when one was
-re-rendered and still needs that upload, and upload it only when the user asks.
+**Store media lives in the App Asset Library** (API 4.5.1, which deprecated screenshot and
+preview sets). Each image or video is uploaded once into the app's library, then _placed_
+on a localization under a placement type and a placement group (the device family).
+`app_store_connect_list_placements` on each version localization is the view of what the
+page carries, in order and with the file behind each placement: use it to tell whether
+the version has a complete set (an incomplete one blocks submission, and nothing in this
+audit can see it) and whether what is placed is the current render. The set-based reads
+(`list_screenshot_sets`, `list_preview_sets`) still answer, but they cannot see iPhone
+Duo or the creative assets.
+
+What reaches the store goes through `app_store_connect_upload_library_asset`, which
+uploads, waits for processing and places in one call, or through `create_placement` for an
+asset already in the library. Only when the user asks, and only on a version in
+`PREPARE_FOR_SUBMISSION` (placements need an editable parent). Four things that cost time
+when missed:
+
+- **A placement group holds at most 10 screenshots**, and a new version starts with the
+  previous version's placements copied onto it. Replacing a set means
+  `delete_placement` on the old ones before the new ones fit (the old images stay in the
+  library). Then `list_placements` with `sort=placementGroupPosition`, and
+  `reorder_placements` if the order is not the store order.
+- **Processing takes from seconds to several minutes**, a large creative asset the
+  longest. An upload that returns `stillProcessing` succeeded and was not placed: poll
+  `get_library_asset` and call `create_placement` once it reaches
+  `PREPARE_FOR_SUBMISSION`. Never re-upload it. Pass a `waitSeconds` under the MCP
+  client's tool timeout (60 s unless `MCP_TOOL_TIMEOUT` raises it), or the client gives up
+  while the server keeps going.
+- **Creative assets** (iOS 27 and iPadOS 27): one `PRODUCT_PAGE_HEADER_ASSET` and one
+  `APP_STORE_SEARCH_RESULTS_ASSET` per localization, group `DEFAULT_PROFILE`, category
+  `CREATIVE_ASSETS`. A project composing them keeps them beside its screenshots (an appshot
+  family config with an `area`, e.g. `Screenshots/creative/<locale>/`), and they go stale
+  with the same captures and theme.
+- **Device families come from `get_asset_specs`**, not from memory. iPhone Duo
+  (`IPHONE_DUO_PROFILE`) exists only there, and the upload checks the spec App Store
+  Connect matched against the group before placing.
+
+An app preview is placed the same way, with placement type `APP_PREVIEW` (up to three per
+device family and locale, 15 to 30 s each). Previews are optional, so a missing one never
+blocks submission; say when one was re-rendered and still needs that upload, and upload it
+only when the user asks.
 
 Do not bump versions, commit, tag, or submit **on your own initiative**. This skill
 writes documents; shipping is the user's call. When they do ask you to ship it, section 7
