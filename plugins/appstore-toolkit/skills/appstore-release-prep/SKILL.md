@@ -356,7 +356,10 @@ when missed:
   `APP_STORE_SEARCH_RESULTS_ASSET` per localization, group `DEFAULT_PROFILE`, category
   `CREATIVE_ASSETS`. A project composing them keeps them beside its screenshots (an appshot
   family config with an `area`, e.g. `Screenshots/creative/<locale>/`), and they go stale
-  with the same captures and theme.
+  with the same captures and theme. Before composing or reviewing one, read
+  `references/asset-best-practices.md`: Apple's content rules for every asset, the
+  specs, and the measured art safe areas, which hold the focal point and are not a frame
+  to shrink the art into.
 - **Device families come from `get_asset_specs`**, not from memory. iPhone Duo
   (`IPHONE_DUO_PROFILE`) exists only there, and the upload checks the spec App Store
   Connect matched against the group before placing.
