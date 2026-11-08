@@ -337,9 +337,11 @@ Duo or the creative assets.
 
 What reaches the store goes through `app_store_connect_upload_library_asset`, which
 uploads, waits for processing and places in one call, or through `create_placement` for an
-asset already in the library. Only when the user asks, and only on a version in
-`PREPARE_FOR_SUBMISSION` (placements need an editable parent). Four things that cost time
-when missed:
+asset already in the library. Only when the user asks. A version in
+`PREPARE_FOR_SUBMISSION` takes any processed asset; a **live** version's localization takes
+only an `APPROVED` one, and Apple answers anything else `409
+ENTITY_ERROR.RELATIONSHIP.INVALID`, "The asset must be in the APPROVED state because the
+parent is already approved". Five things that cost time when missed:
 
 - **A placement group holds at most 10 screenshots**, and a new version starts with the
   previous version's placements copied onto it. Replacing a set means
@@ -348,10 +350,18 @@ when missed:
   `reorder_placements` if the order is not the store order.
 - **Processing takes from seconds to several minutes**, a large creative asset the
   longest. An upload that returns `stillProcessing` succeeded and was not placed: poll
-  `get_library_asset` and call `create_placement` once it reaches
-  `PREPARE_FOR_SUBMISSION`. Never re-upload it. Pass a `waitSeconds` under the MCP
-  client's tool timeout (60 s unless `MCP_TOOL_TIMEOUT` raises it), or the client gives up
-  while the server keeps going.
+  `get_library_asset` until `stillProcessing` is gone (the asset then has its file and a
+  `specId`; `state` alone has read `COMPLETE` before that), then call `create_placement`.
+  Never re-upload it. The default `waitSeconds` (40) stays under a 60 s MCP client
+  timeout; a client timeout is not a failure, the server has already committed the bytes.
+- **New media for a live page, without a new version.** Once the app has an approved
+  version, upload the asset without placing it, send it to review alone with
+  `submit_items_for_review` (`assetIds`; `dryRun` first, and only when the user asks: it
+  goes to Apple), wait for `APPROVED`, then place it on the live localization. Apple
+  allows one such item-only submission per platform under review, beside the version's.
+  Screenshots for a product page optimization test go on the treatment localizations
+  `create_experiment` returns, and reach review with the test (`experimentIds`), never on
+  their own: Apple reviews a placed asset with what it is placed on.
 - **Creative assets** (iOS 27 and iPadOS 27): one `PRODUCT_PAGE_HEADER_ASSET` and one
   `APP_STORE_SEARCH_RESULTS_ASSET` per localization, group `DEFAULT_PROFILE`, category
   `CREATIVE_ASSETS`. A project composing them keeps them beside its screenshots (an appshot
