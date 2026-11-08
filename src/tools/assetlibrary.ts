@@ -103,9 +103,18 @@ const PROCESSING_STATES = new Set(["AWAITING_UPLOAD", "UPLOAD_COMPLETE"]);
 export const isProcessed = (kind: MediaKind, attrs: Rec): boolean => {
   const state = optString(attrs.state);
   if (state === undefined || state === "FAILED" || PROCESSING_STATES.has(state)) return false;
-  const file = kind === "image" ? attrs.imageAsset : attrs.videoAsset;
-  return isRecord(file) && optString(attrs.specId) !== undefined;
+  return hasFile(kind, attrs) && optString(attrs.specId) !== undefined;
 };
+
+/**
+ * Whether processing has produced the file. The two kinds spell it
+ * differently: an image's `imageAsset` is an object (template URL and
+ * dimensions), a video's `videoAsset` is the HLS playlist URL as a plain string.
+ */
+const hasFile = (kind: MediaKind, attrs: Rec): boolean =>
+  kind === "image"
+    ? isRecord(attrs.imageAsset)
+    : isRecord(attrs.videoAsset) || optString(attrs.videoAsset) !== undefined;
 
 /**
  * Apple's answer to a placement of an unapproved asset on a parent that is
@@ -643,18 +652,38 @@ const listPlacements = async (
   };
 };
 
-const placementIdsInGroup = async (
+/**
+ * A group's placements in display order, each with its placement type. One
+ * device group holds several types (the screenshots and the app preview), and
+ * Apple orders each type on its own.
+ */
+const placementsInGroup = async (
   client: AppStoreConnectClient,
   surface: Surface,
   localizationId: string,
   placementGroup: string,
-): Promise<string[]> => {
+): Promise<{ id: string; placementType: string | undefined }[]> => {
   const { data } = await client.getAll<Rec>(placementsPath(surface, localizationId), {
     "filter[placementGroup]": placementGroup,
     sort: "placementGroupPosition",
     limit: 200,
   });
-  return data.map((row) => optString(row.id)).filter((id): id is string => id !== undefined);
+  return data.flatMap((row) => {
+    const id = optString(row.id);
+    if (id === undefined) return [];
+    const attrs = isRecord(row.attributes) ? row.attributes : {};
+    return [{ id, placementType: optString(attrs.placementType) }];
+  });
+};
+
+/** "APP_PREVIEW: a, b; APP_SCREENSHOT: c" — a group's placements by type. */
+const describeByType = (rows: { id: string; placementType: string | undefined }[]): string => {
+  const byType = new Map<string, string[]>();
+  for (const row of rows) {
+    const key = row.placementType ?? "unknown type";
+    byType.set(key, [...(byType.get(key) ?? []), row.id]);
+  }
+  return [...byType].map(([type, ids]) => `${type}: ${ids.join(", ")}`).join("; ");
 };
 
 // ─── registration ───────────────────────────────────────────────────────────
@@ -920,9 +949,9 @@ export const registerAssetLibraryTools = (
         }
         if (!isProcessed(kind, attrs)) {
           throw new Error(
-            `Asset ${args.assetId} is still processing (state ${state ?? "unknown"}, ` +
-              `${optString(attrs.specId) ? "" : "no specId, "}` +
-              `${isRecord(kind === "image" ? attrs.imageAsset : attrs.videoAsset) ? "" : "no file yet, "}` +
+            `Asset ${args.assetId} is still processing (state ${state ?? "unknown"}` +
+              `${optString(attrs.specId) ? "" : ", no specId"}` +
+              `${hasFile(kind, attrs) ? "" : ", no file yet"}), ` +
               `so it cannot be placed yet. Wait with app_store_connect_get_library_asset until it ` +
               `reports no stillProcessing; do not re-upload it.`,
           );
@@ -941,10 +970,14 @@ export const registerAssetLibraryTools = (
     {
       title: "App Store Connect: Reorder Placements",
       description:
-        "Set the display order of the placements in one group on one localization — the order " +
-        "customers see. Pass EVERY placement in the group: the tool reads the group first and " +
-        "refuses a list that leaves any out or names one from elsewhere, because Apple does " +
-        "not document what an ordering request does to a placement it omits.",
+        "Set the display order of the placements of one placement type in one group on one " +
+        "localization — the order customers see. A device group can hold several types (its " +
+        "screenshots and its app preview) and Apple orders each type on its own, so one call " +
+        "orders one type: pass EVERY placement of that type in the group, and none of another. " +
+        "The type is taken from the placements passed, or from `placementType`. The tool reads " +
+        "the group first and refuses a list that leaves one of that type out, mixes types or " +
+        "names one from elsewhere, because Apple does not document what an ordering request " +
+        "does to a placement it omits.",
       inputSchema: z.object({
         localizationId: localizationIdArg,
         surface: z
@@ -954,28 +987,60 @@ export const registerAssetLibraryTools = (
             "What `localizationId` is. In-app event localizations take no ordering request.",
           ),
         placementGroup: placementGroupArg,
+        placementType: z
+          .enum(PLACEMENT_TYPES)
+          .optional()
+          .describe(
+            "The placement type being ordered, e.g. APP_SCREENSHOT. Defaults to the type of " +
+              "the placements passed.",
+          ),
         placementIds: z
           .array(z.string().min(1))
           .min(1)
-          .describe("Every placement id in the group, in the desired display order."),
+          .describe("Every placement id of that type in the group, in the desired display order."),
         confirm: confirmArg,
       }),
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    async ({ localizationId, surface, placementGroup, placementIds }) =>
+    async ({ localizationId, surface, placementGroup, placementType, placementIds }) =>
       wrap(async () => {
-        const current = await placementIdsInGroup(client, surface, localizationId, placementGroup);
+        const group = await placementsInGroup(client, surface, localizationId, placementGroup);
+        const typeOf = new Map(group.map((row) => [row.id, row.placementType]));
+        const passedTypes = [
+          ...new Set(
+            placementIds
+              .map((id) => typeOf.get(id))
+              .filter((type): type is string => type !== undefined),
+          ),
+        ];
+        if (passedTypes.length > 1) {
+          throw new Error(
+            `The list mixes placement types (${passedTypes.join(", ")}), and Apple orders each ` +
+              `type on its own. Order one type per call. The group currently holds, in order: ` +
+              `${describeByType(group)}.`,
+          );
+        }
+        const type = placementType ?? passedTypes[0];
+        // Rows that carry no type are kept in, so a list is never checked
+        // against less than it should be.
+        const current = group
+          .filter(
+            (row) =>
+              type === undefined || row.placementType === undefined || row.placementType === type,
+          )
+          .map((row) => row.id);
         const missing = current.filter((id) => !placementIds.includes(id));
         const foreign = placementIds.filter((id) => !current.includes(id));
         const repeated = placementIds.filter((id, i) => placementIds.indexOf(id) !== i);
         if (missing.length > 0 || foreign.length > 0 || repeated.length > 0) {
+          const scope = type === undefined ? placementGroup : `${type} in ${placementGroup}`;
           throw new Error(
             [
-              `The list must hold each placement in ${placementGroup} exactly once.`,
+              `The list must hold each placement of ${scope} exactly once.`,
               missing.length > 0 ? `Missing: ${missing.join(", ")}.` : "",
-              foreign.length > 0 ? `Not in this group: ${foreign.join(", ")}.` : "",
+              foreign.length > 0 ? `Not ${scope}: ${foreign.join(", ")}.` : "",
               repeated.length > 0 ? `Repeated: ${[...new Set(repeated)].join(", ")}.` : "",
-              `The group currently holds, in order: ${current.join(", ") || "(nothing)"}.`,
+              `The group currently holds, in order: ${describeByType(group) || "(nothing)"}.`,
             ]
               .filter(Boolean)
               .join(" "),

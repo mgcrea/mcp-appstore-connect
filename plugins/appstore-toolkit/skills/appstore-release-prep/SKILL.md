@@ -347,7 +347,9 @@ parent is already approved". Five things that cost time when missed:
   previous version's placements copied onto it. Replacing a set means
   `delete_placement` on the old ones before the new ones fit (the old images stay in the
   library). Then `list_placements` with `sort=placementGroupPosition`, and
-  `reorder_placements` if the order is not the store order.
+  `reorder_placements` if the order is not the store order. It orders one placement type
+  at a time: pass the screenshots only, never the group's app preview with them, and never
+  delete the preview to get an order through.
 - **Processing takes from seconds to several minutes**, a large creative asset the
   longest. An upload that returns `stillProcessing` succeeded and was not placed: poll
   `get_library_asset` until `stillProcessing` is gone (the asset then has its file and a

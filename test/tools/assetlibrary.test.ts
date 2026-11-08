@@ -323,6 +323,102 @@ describe("asset library placements", () => {
     expect(body.relationships.appStoreVersionLocalization.data.id).toBe("loc-1");
   });
 
+  // Recorded from Cadence: one device group holds the screenshots and the app
+  // preview, and Apple orders each placement type on its own — a request that
+  // names both answers 409 "must have the same 'placementType'".
+  const mixedGroupRoute = on("GET", "/v1/appStoreVersionLocalizations/loc-1/placements", () =>
+    jsonResponse({
+      data: [
+        {
+          id: "pl-vid",
+          type: "appAssetLibraryPlacements",
+          attributes: { placementType: "APP_PREVIEW" },
+        },
+        {
+          id: "pl-a",
+          type: "appAssetLibraryPlacements",
+          attributes: { placementType: "APP_SCREENSHOT" },
+        },
+        {
+          id: "pl-b",
+          type: "appAssetLibraryPlacements",
+          attributes: { placementType: "APP_SCREENSHOT" },
+        },
+      ],
+    }),
+  );
+
+  it("orders the screenshots of a group that also holds a preview, without the preview", async () => {
+    const fetchImpl = stub([
+      mixedGroupRoute,
+      on(
+        "POST",
+        "/v1/appAssetLibraryPlacementOrderingRequests",
+        () => new Response(null, { status: 201 }),
+      ),
+    ]);
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_reorder_placements",
+      arguments: {
+        localizationId: "loc-1",
+        placementGroup: "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE",
+        placementIds: ["pl-b", "pl-a"],
+        confirm: true,
+      },
+    });
+
+    expect(result.isError, textOf(result)).toBeFalsy();
+    const body = bodyOf(
+      find(fetchImpl, "POST", "/v1/appAssetLibraryPlacementOrderingRequests"),
+    ).data;
+    expect(body.relationships.orderedPlacements.data.map((p: { id: string }) => p.id)).toEqual([
+      "pl-b",
+      "pl-a",
+    ]);
+  });
+
+  it("refuses an order that mixes placement types, before Apple's 409", async () => {
+    const fetchImpl = stub([mixedGroupRoute]);
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_reorder_placements",
+      arguments: {
+        localizationId: "loc-1",
+        placementGroup: "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE",
+        placementIds: ["pl-vid", "pl-b", "pl-a"],
+        confirm: true,
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toContain("APP_PREVIEW");
+    expect(text).toContain("APP_SCREENSHOT");
+    expect(find(fetchImpl, "POST", "/v1/appAssetLibraryPlacementOrderingRequests")).toBeUndefined();
+  });
+
+  it("checks for missing placements within the one placement type", async () => {
+    const fetchImpl = stub([mixedGroupRoute]);
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_reorder_placements",
+      arguments: {
+        localizationId: "loc-1",
+        placementGroup: "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE",
+        placementType: "APP_SCREENSHOT",
+        placementIds: ["pl-b"],
+        confirm: true,
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toContain("Missing: pl-a.");
+    expect(text).not.toContain("Missing: pl-vid");
+    expect(find(fetchImpl, "POST", "/v1/appAssetLibraryPlacementOrderingRequests")).toBeUndefined();
+  });
+
   it("lists placements with the file behind each one", async () => {
     const fetchImpl = stub([
       on("GET", "/v1/appStoreVersionLocalizations/loc-1/placements", (url) => {
@@ -480,5 +576,98 @@ describe("asset library placements", () => {
 
     expect(result.isError, textOf(result)).toBeFalsy();
     expect(payloadOf(result)).toMatchObject({ kind: "video", id: "vid-1", state: "APPROVED" });
+  });
+
+  // Recorded from Cadence: a processed video's `videoAsset` is the HLS URL as a
+  // plain string, where an image's `imageAsset` is an object.
+  const PROCESSED_VIDEO = {
+    state: "PREPARE_FOR_SUBMISSION",
+    specId: "SPEC_PREVIEW",
+    category: "APP_SCREENSHOTS_AND_PREVIEWS",
+    videoAsset: "https://apptrailers.itunes.apple.com/itunes-assets/x/P1_default.m3u8",
+  };
+  const videoRoutes = (attributes: Record<string, unknown>): Route[] => [
+    on("GET", "/v1/appAssetLibraryImages/vid-1", () => errorResponse(404, "NOT_FOUND")),
+    on("GET", "/v1/appAssetLibraryVideos/vid-1", () =>
+      jsonResponse({ data: { id: "vid-1", type: "appAssetLibraryVideos", attributes } }),
+    ),
+  ];
+
+  it("does not flag a processed video whose file is a URL string", async () => {
+    const fetchImpl = stub([
+      ...videoRoutes(PROCESSED_VIDEO),
+      on("GET", "/v1/appAssetLibraryVideos/vid-1/placements", () => jsonResponse({ data: [] })),
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_get_library_asset",
+      arguments: { assetId: "vid-1" },
+    });
+
+    expect(result.isError, textOf(result)).toBeFalsy();
+    expect(payloadOf(result)).not.toHaveProperty("stillProcessing");
+  });
+
+  it("places a processed video", async () => {
+    const previewRef = {
+      data: [
+        {
+          id: "ref",
+          type: "appAssetLibraryRefData",
+          attributes: {
+            placementTypes: [
+              {
+                placementTypeId: "APP_PREVIEW",
+                acceptsAssetCategories: ["APP_SCREENSHOTS_AND_PREVIEWS"],
+                specMappings: [
+                  {
+                    placementGroupId: "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE",
+                    specs: ["SPEC_PREVIEW"],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const fetchImpl = stub([
+      ...videoRoutes(PROCESSED_VIDEO),
+      on("GET", "/v1/appAssetLibraryRefData", () => jsonResponse(previewRef)),
+      on("POST", "/v1/appAssetLibraryPlacements", () =>
+        jsonResponse({ data: { id: "pl-vid", type: "appAssetLibraryPlacements" } }),
+      ),
+    ]);
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_create_placement",
+      arguments: {
+        assetId: "vid-1",
+        localizationId: "loc-1",
+        placementType: "APP_PREVIEW",
+        placementGroup: "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE",
+      },
+    });
+
+    expect(result.isError, textOf(result)).toBeFalsy();
+    const body = bodyOf(find(fetchImpl, "POST", "/v1/appAssetLibraryPlacements")).data;
+    expect(body.relationships.video.data.id).toBe("vid-1");
+  });
+
+  it("still refuses a video with no file yet", async () => {
+    const fetchImpl = stub(videoRoutes({ ...PROCESSED_VIDEO, videoAsset: null }));
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_create_placement",
+      arguments: {
+        assetId: "vid-1",
+        localizationId: "loc-1",
+        placementType: "APP_PREVIEW",
+        placementGroup: "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE",
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("no file yet");
   });
 });
