@@ -26,6 +26,15 @@ export const relatedId = (res: Rec, name: string): string | undefined => {
   return isRecord(rel.data) && typeof rel.data.id === "string" ? rel.data.id : undefined;
 };
 
+/** The ids on the far side of a to-many relationship. */
+export const relatedIds = (res: Rec, name: string): string[] => {
+  const rels = isRecord(res.relationships) ? res.relationships : {};
+  const rel = isRecord(rels[name]) ? (rels[name] as Rec) : {};
+  return Array.isArray(rel.data)
+    ? rel.data.filter(isRecord).flatMap((d) => (typeof d.id === "string" ? [d.id] : []))
+    : [];
+};
+
 /** Pull the first sideloaded resource of a type out of the top-level `included` array. */
 export const firstIncluded = (response: unknown, type: string): Rec | undefined => {
   if (!isRecord(response) || !Array.isArray(response.included)) return undefined;

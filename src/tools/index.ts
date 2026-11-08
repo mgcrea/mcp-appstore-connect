@@ -15,6 +15,7 @@ import { registerCertificateTools } from "#/tools/certificates";
 import { registerCustomerReviewTools } from "#/tools/customerreviews";
 import { registerDeviceTools } from "#/tools/devices";
 import { registerDiagnosticTools } from "#/tools/diagnostics";
+import { registerExperimentTools } from "#/tools/experiments";
 import { registerIapTools } from "#/tools/iap";
 import { registerListingTools } from "#/tools/listing";
 import { registerPhasedReleaseTools } from "#/tools/phasedrelease";
@@ -94,6 +95,9 @@ export const registerTools = (
   // The asset library supersedes both (API 4.5.1), and is the only route for
   // iPhone Duo and the iOS 27 creative assets, so it sits right after them.
   registerAssetLibraryTools(server, client, allowWrites);
+  // Product page optimization tests carry their media as asset library
+  // placements on treatment localizations, so they sit right after it.
+  registerExperimentTools(server, client, allowWrites);
   registerBuildTools(server, client, allowWrites);
   // Per-build hang, disk-write and launch signatures: read-only, and per build.
   registerDiagnosticTools(server, client);

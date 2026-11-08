@@ -3,15 +3,22 @@ import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
 import {
+  AppStoreConnectApiError,
+  flattenAssociatedErrors,
+  formatAssociatedError,
+} from "#/client/errors";
+import {
   type Rec,
   attributesOf,
   includedIndex,
   isRecord,
   relatedId,
+  relatedIds,
   resourceOf,
   resourcesOf,
   summarizeResponse,
 } from "#/client/shape";
+import { fetchAsset, isProcessed, RESOURCE } from "#/tools/assetlibrary";
 import {
   type AssetPack,
   type AssetPackPlan,
@@ -19,6 +26,7 @@ import {
   readAssetPacks,
 } from "#/tools/assetpacks";
 import {
+  appIdArg,
   appIdsArg,
   compact,
   confirmArg,
@@ -112,6 +120,9 @@ const ITEM_KINDS = [
   "appEvent",
   "appCustomProductPageVersion",
   "appStoreVersionExperimentV2",
+  "appAssetLibraryImage",
+  "appAssetLibraryVideo",
+  "retentionMessageVersion",
   "backgroundAssetVersion",
   "gameCenterAchievementVersion",
   "gameCenterActivityVersion",
@@ -163,6 +174,17 @@ const restoreOf = (kind: string | undefined): Restore => {
           "app_store_connect_submit_version_for_review re-adds the app's pending asset-pack " +
           "versions (includeAssetPacks, on by default) and reports each pack it did not add",
       };
+    case "appAssetLibraryImage":
+    case "appAssetLibraryVideo":
+    case "appStoreVersionExperimentV2":
+    case "appCustomProductPageVersion":
+    case "appEvent":
+      return {
+        restoredBy: "api",
+        how:
+          "app_store_connect_submit_items_for_review, as an item-only submission (no version), " +
+          "once the app has an approved version",
+      };
     case "inAppPurchaseVersion":
       return {
         restoredBy: "webUi",
@@ -182,15 +204,6 @@ const restoreOf = (kind: string | undefined): Restore => {
         how: `${WEB_UI}: this server has no tool that adds a ${kind} to a review submission`,
       };
   }
-};
-
-/** The ids on the far side of a to-many relationship. */
-const relatedIds = (res: Rec, name: string): string[] => {
-  const rels = isRecord(res.relationships) ? res.relationships : {};
-  const rel = isRecord(rels[name]) ? (rels[name] as Rec) : {};
-  return Array.isArray(rel.data)
-    ? rel.data.filter(isRecord).flatMap((d) => (typeof d.id === "string" ? [d.id] : []))
-    : [];
 };
 
 /** One item's state and, when its relationships were included, what it is. */
@@ -263,6 +276,10 @@ const summarizeSubmissions = (
         // still be told apart.
         appId: relatedId(res, "app"),
         appStoreVersionForReview: relatedId(res, "appStoreVersionForReview"),
+        // An item-only submission: library assets, a test, a custom product
+        // page or an event, reviewed without a version. Apple allows one such
+        // per platform under review, beside one that holds a version.
+        ...(isItemOnly(res, items) ? { itemOnly: true } : {}),
         ...(items.length > 0 ? { items } : {}),
       };
     }),
@@ -271,6 +288,16 @@ const summarizeSubmissions = (
 };
 
 type ItemDetails = { details: Map<string, ItemSummary[]>; failed: string[] };
+
+/**
+ * Whether a submission carries no version. Read off both the submission's own
+ * `appStoreVersionForReview` and its items, since a draft can hold a version
+ * item before Apple fills in the former.
+ */
+const isItemOnly = (submission: Rec, items: ItemSummary[]): boolean =>
+  relatedId(submission, "appStoreVersionForReview") === undefined &&
+  items.length > 0 &&
+  items.every((item) => item.kind !== undefined && item.kind !== "appStoreVersion");
 
 /** How many submissions' items are read at once, so a long list does not burst Apple's rate limit. */
 const ITEM_READ_CONCURRENCY = 5;
@@ -685,6 +712,322 @@ const assertSubmittable = (versionResponse: unknown): { appId: string; platform:
   return { appId: appId as string, platform: platform as string };
 };
 
+// ─── item-only submissions ──────────────────────────────────────────────────
+//
+// Once an app has an approved version, Apple reviews library assets, product
+// page optimization tests, custom product page versions and in-app events
+// without a version: a review submission whose items are only those. Apple
+// allows one such submission per platform under review at a time, beside one
+// that holds a version. `reviewSubmissionItems` takes each through its own
+// to-one relationship (spec 4.6, ReviewSubmissionItemCreateRequest).
+
+/** The item kinds this server submits without a version, by relationship name. */
+const ITEM_ONLY_KINDS = {
+  appAssetLibraryImage: "appAssetLibraryImages",
+  appAssetLibraryVideo: "appAssetLibraryVideos",
+  appStoreVersionExperimentV2: "appStoreVersionExperiments",
+  appCustomProductPageVersion: "appCustomProductPageVersions",
+  appEvent: "appEvents",
+} as const;
+type ItemOnlyKind = keyof typeof ITEM_ONLY_KINDS;
+
+/** Library asset states that can still go to review, or are already staged for it. */
+const SUBMITTABLE_ASSET_STATES = new Set([
+  "PREPARE_FOR_SUBMISSION",
+  "REJECTED",
+  "READY_FOR_REVIEW",
+]);
+
+/** Test states that can still go to review, or are already staged for it. */
+const SUBMITTABLE_EXPERIMENT_STATES = new Set([
+  "PREPARE_FOR_SUBMISSION",
+  "REJECTED",
+  "READY_FOR_REVIEW",
+]);
+
+type PlannedItem = { kind: ItemOnlyKind; id: string; note?: string };
+
+type ItemOutcome = PlannedItem & {
+  action: "added" | "wouldBeAdded" | "alreadyOnSubmission" | "skipped" | "refused";
+  reason?: string;
+};
+
+type ItemOnlyArgs = {
+  appId: string;
+  platform: (typeof PLATFORMS)[number];
+  assetIds?: string[] | undefined;
+  experimentIds?: string[] | undefined;
+  customProductPageVersionIds?: string[] | undefined;
+  appEventIds?: string[] | undefined;
+  dryRun: boolean;
+};
+
+const errorText = (err: unknown): string => {
+  if (!(err instanceof Error)) return String(err);
+  const associated = flattenAssociatedErrors(
+    err instanceof AppStoreConnectApiError ? err.errors : undefined,
+  ).map(formatAssociatedError);
+  return associated.length > 0 ? `${err.message} (${associated.join("; ")})` : err.message;
+};
+
+/**
+ * Read each named item and decide, before anything is created, whether it can
+ * go to review alone. Every problem is collected, so a caller with three bad
+ * ids learns all three in one round trip.
+ */
+const planItems = async (
+  client: AppStoreConnectClient,
+  args: ItemOnlyArgs,
+): Promise<{ planned: PlannedItem[]; skipped: ItemOutcome[] }> => {
+  const planned: PlannedItem[] = [];
+  const skipped: ItemOutcome[] = [];
+  const problems: string[] = [];
+
+  for (const id of args.assetIds ?? []) {
+    const { kind, response } = await fetchAsset(client, id);
+    const attrs = attributesOf(resourceOf(response));
+    const itemKind: ItemOnlyKind =
+      kind === "image" ? "appAssetLibraryImage" : "appAssetLibraryVideo";
+    const state = String(attrs.state);
+    if (state === "APPROVED") {
+      skipped.push({ kind: itemKind, id, action: "skipped", reason: "already APPROVED" });
+      continue;
+    }
+    if (!isProcessed(kind, attrs)) {
+      problems.push(`asset ${id} is still processing (state ${state}); wait for it first`);
+      continue;
+    }
+    if (!SUBMITTABLE_ASSET_STATES.has(state)) {
+      problems.push(`asset ${id} is ${state}, which is not a state Apple takes for review`);
+      continue;
+    }
+    const placements = resourcesOf(
+      await client.get(`/v1/${RESOURCE[kind]}/${id}/placements`, { limit: 5 }),
+    );
+    if (placements.length > 0) {
+      // Apple's help: an asset placed on a version, custom product page, test
+      // or event "is reviewed with that item and can't be submitted separately".
+      problems.push(
+        `asset ${id} is placed (${placements.map((p) => String(p.id)).join(", ")}), and Apple ` +
+          `reviews a placed asset with what it is placed on, never alone: submit that test, ` +
+          `custom product page or event instead, or the version it sits on`,
+      );
+      continue;
+    }
+    planned.push({ kind: itemKind, id });
+  }
+
+  for (const id of args.experimentIds ?? []) {
+    const attrs = attributesOf(
+      resourceOf(await client.get(`/v2/appStoreVersionExperiments/${id}`)),
+    );
+    const state = String(attrs.state);
+    if (attrs.platform !== undefined && attrs.platform !== args.platform) {
+      problems.push(`test ${id} is on ${String(attrs.platform)}, not ${args.platform}`);
+    } else if (!SUBMITTABLE_EXPERIMENT_STATES.has(state)) {
+      problems.push(`test ${id} is ${state}, which is not a state Apple takes for review`);
+    } else {
+      planned.push({
+        kind: "appStoreVersionExperimentV2",
+        id,
+        ...(attrs.reviewRequired === false
+          ? {
+              note:
+                "Apple marks this test reviewRequired: false. If Apple refuses it here, start " +
+                "it with app_store_connect_update_experiment instead.",
+            }
+          : {}),
+      });
+    }
+  }
+
+  for (const id of args.customProductPageVersionIds ?? []) {
+    planned.push({ kind: "appCustomProductPageVersion", id });
+  }
+  for (const id of args.appEventIds ?? []) planned.push({ kind: "appEvent", id });
+
+  if (problems.length > 0) {
+    throw new PreconditionError(`Nothing was created or submitted: ${problems.join("; ")}.`, {
+      problems,
+      wouldSkip: skipped,
+    });
+  }
+  return { planned, skipped };
+};
+
+/**
+ * The app's open submissions on this platform, each with what it holds, and
+ * the one a new item-only submission can use: its own draft, if it has one
+ * that holds no version.
+ */
+const findItemOnlyDraft = async (
+  client: AppStoreConnectClient,
+  appId: string,
+  platform: string,
+): Promise<{ draftId?: string; draftItems: ItemSummary[]; versionInFlight?: string }> => {
+  const open = resourcesOf(
+    await client.get(`/v1/apps/${appId}/reviewSubmissions`, {
+      "filter[platform]": platform,
+      "filter[state]": [RETURNED_STATE, ...IN_FLIGHT_STATES, DRAFT_STATE],
+      include: "appStoreVersionForReview",
+      limit: 50,
+    }),
+  );
+  let draftId: string | undefined;
+  let draftItems: ItemSummary[] = [];
+  let versionInFlight: string | undefined;
+  for (const submission of open) {
+    const id = String(submission.id);
+    const state = String(attributesOf(submission).state);
+    const items = await readItems(client, id);
+    const holdsVersion =
+      relatedId(submission, "appStoreVersionForReview") !== undefined ||
+      items.some((item) => item.kind === "appStoreVersion");
+
+    if (holdsVersion) {
+      if (state === DRAFT_STATE) {
+        throw new PreconditionError(
+          `This app's ${platform} draft submission ${id} holds a version, so items added to it ` +
+            `would go to review with that version, not on their own. Submit the version with ` +
+            `app_store_connect_submit_version_for_review first, or take it off the draft with ` +
+            `app_store_connect_remove_version_from_submission.`,
+          { submissionId: id, state, items },
+        );
+      }
+      if (state !== RETURNED_STATE) versionInFlight = id;
+      continue;
+    }
+    if (state === DRAFT_STATE) {
+      draftId = id;
+      draftItems = items;
+      continue;
+    }
+    throw new PreconditionError(
+      state === RETURNED_STATE
+        ? `This app's item-only ${platform} submission ${id} came back from Apple ` +
+            `(UNRESOLVED_ISSUES). Apple allows one item-only submission per platform at a time: ` +
+            `resolve that one in App Store Connect's App Review page, or cancel it with ` +
+            `app_store_connect_cancel_review_submission, before sending another.`
+        : `This app already has an item-only ${platform} submission with Apple (${id}, ${state}), ` +
+            `and Apple allows one per platform under review at a time. Wait for it to finish, or ` +
+            `withdraw it with app_store_connect_cancel_review_submission (dryRun first).`,
+      { submissionId: id, state, items },
+    );
+  }
+  return { ...compact({ draftId, versionInFlight }), draftItems };
+};
+
+const submitItemsForReview = async (
+  client: AppStoreConnectClient,
+  args: ItemOnlyArgs,
+): Promise<unknown> => {
+  const { planned, skipped } = await planItems(client, args);
+  if (planned.length === 0) {
+    throw new PreconditionError("None of the items needs review, so nothing was created.", {
+      items: skipped,
+    });
+  }
+
+  const { draftId, draftItems, versionInFlight } = await findItemOnlyDraft(
+    client,
+    args.appId,
+    args.platform,
+  );
+  const submissionId =
+    draftId ??
+    String(
+      resourceOf(
+        await client.post("/v1/reviewSubmissions", {
+          data: {
+            type: "reviewSubmissions",
+            attributes: { platform: args.platform },
+            relationships: { app: { data: { type: "apps", id: args.appId } } },
+          },
+        }),
+      ).id,
+    );
+
+  // Adding the item is where Apple adjudicates each kind, as with a version:
+  // a refusal here is Apple's answer for that item, so the rest still go on
+  // and every answer is reported, but nothing is submitted while any is refused.
+  const outcomes: ItemOutcome[] = [...skipped];
+  for (const item of planned) {
+    if (draftItems.some((d) => d.kind === item.kind && d.targetId === item.id)) {
+      outcomes.push({ ...item, action: "alreadyOnSubmission" });
+      continue;
+    }
+    try {
+      await client.post("/v1/reviewSubmissionItems", {
+        data: {
+          type: "reviewSubmissionItems",
+          relationships: {
+            reviewSubmission: { data: { type: "reviewSubmissions", id: submissionId } },
+            [item.kind]: { data: { type: ITEM_ONLY_KINDS[item.kind], id: item.id } },
+          },
+        },
+      });
+      outcomes.push({ ...item, action: args.dryRun ? "wouldBeAdded" : "added" });
+    } catch (err) {
+      outcomes.push({ ...item, action: "refused", reason: errorText(err) });
+    }
+  }
+  // Items already on the reused draft that this call did not name ride along.
+  const alsoOnDraft = draftItems.filter(
+    (d) => d.state !== "REMOVED" && !planned.some((p) => p.kind === d.kind && p.id === d.targetId),
+  );
+
+  const refused = outcomes.filter((o) => o.action === "refused");
+  const base = {
+    submissionId,
+    platform: args.platform,
+    reusedDraft: draftId !== undefined,
+    items: outcomes,
+    ...(alsoOnDraft.length > 0 ? { alsoOnDraft } : {}),
+    ...(versionInFlight !== undefined ? { versionSubmissionWithApple: versionInFlight } : {}),
+  };
+  const ONE_PER_PLATFORM =
+    "Apple allows one item-only submission per platform under review at a time, beside one " +
+    "that holds a version.";
+
+  if (refused.length > 0) {
+    return {
+      ...base,
+      submitted: false,
+      ...(args.dryRun ? { dryRun: true } : {}),
+      note:
+        `Apple refused ${refused.length} item(s); each says why. The submission has NOT been ` +
+        `sent to Apple. The accepted items stay staged on draft ${submissionId}: re-run ` +
+        `without the refused ones to submit, or take items off the draft with ` +
+        `app_store_connect_remove_submission_items. ${ONE_PER_PLATFORM}`,
+    };
+  }
+
+  if (args.dryRun) {
+    return {
+      ...base,
+      dryRun: true,
+      submitted: false,
+      note:
+        "The items are ready: Apple accepted them onto the draft submission, which is still " +
+        "yours and has NOT been sent for review. Staging may move each item to " +
+        "READY_FOR_REVIEW; re-run without dryRun to finish the submission from here, or take " +
+        `items back off with app_store_connect_remove_submission_items. ${ONE_PER_PLATFORM}`,
+    };
+  }
+
+  const submitted = await client.patch(`/v1/reviewSubmissions/${submissionId}`, {
+    data: { type: "reviewSubmissions", id: submissionId, attributes: { submitted: true } },
+  });
+  return {
+    ...base,
+    submission: summarizeResponse(submitted),
+    note:
+      `Sent to Apple without a version. ${ONE_PER_PLATFORM} Follow it with ` +
+      `app_store_connect_list_review_submissions; an approved library asset reads APPROVED in ` +
+      `app_store_connect_get_library_asset, and can then be placed on a live product page.`,
+  };
+};
+
 export const registerSubmissionTools = (
   server: McpServer,
   client: AppStoreConnectClient,
@@ -1097,19 +1440,151 @@ export const registerSubmissionTools = (
   );
 
   server.registerTool(
+    "app_store_connect_submit_items_for_review",
+    {
+      title: "App Store Connect: Submit Items for Review (No Version)",
+      description:
+        "Send items to App Review WITHOUT an app version: library assets (images, videos), " +
+        "product page optimization tests, custom product page versions and in-app events. " +
+        "Apple allows this once the app has an approved version; before that, these items go " +
+        "in the same submission as the first version. Creates (or reuses) the app's draft " +
+        "submission for the platform that holds no version, adds each item, and submits. " +
+        "Apple allows ONE item-only submission per platform under review at a time, beside one " +
+        "that holds a version: a second is refused here and the one in the way is named. A " +
+        "draft that holds a version is refused too, since the items would then go to review " +
+        "with that version. Checked first, all at once: an asset still processing; an asset " +
+        "that is placed (Apple reviews a placed asset with the version, test, page or event it " +
+        "sits on, never alone, so submit that instead: the test, for screenshots placed on its " +
+        "treatments); a test on another platform. An APPROVED asset is skipped. This is the " +
+        "route for an asset bound for a live product page: a live parent only takes APPROVED " +
+        "assets (409 ENTITY_ERROR.RELATIONSHIP.INVALID otherwise), so submit it here, wait for " +
+        "APPROVED, then place it. Each item reports Apple's answer: added, alreadyOnSubmission, " +
+        "skipped, or refused with Apple's error; nothing is submitted while any is refused. " +
+        "Pass dryRun to preflight: it stops before handing anything to Apple and reports what " +
+        "Apple says of each item. A dry run does stage the items on the draft; calling again " +
+        "without dryRun finishes that same submission, and " +
+        "app_store_connect_remove_submission_items takes items back off. Custom product page " +
+        "versions and in-app events are passed through as given (this server has no tools that " +
+        "read them), and neither has been exercised against a live app yet.",
+      inputSchema: z.object({
+        appId: appIdArg,
+        platform: z
+          .enum(PLATFORMS)
+          .default("IOS")
+          .describe("The platform whose item-only submission this is. Defaults to IOS."),
+        assetIds: z
+          .array(z.string().min(1))
+          .optional()
+          .describe(
+            "Asset library image or video ids (app_store_connect_list_library_assets), not placed.",
+          ),
+        experimentIds: z
+          .array(z.string().min(1))
+          .optional()
+          .describe(
+            "Product page optimization test ids (app_store_connect_list_experiments). Their " +
+              "treatments' placed media go to review with them.",
+          ),
+        customProductPageVersionIds: z
+          .array(z.string().min(1))
+          .optional()
+          .describe("appCustomProductPageVersion ids."),
+        appEventIds: z.array(z.string().min(1)).optional().describe("appEvent ids."),
+        dryRun: dryRunArg,
+        confirm: confirmArg,
+      }),
+      // Hands the items to Apple irrecoverably, like submit_version_for_review.
+      annotations: { readOnlyHint: false, destructiveHint: true },
+    },
+    async ({ confirm: _confirm, dryRun = false, ...args }) =>
+      wrap(async () => {
+        const named =
+          (args.assetIds?.length ?? 0) +
+          (args.experimentIds?.length ?? 0) +
+          (args.customProductPageVersionIds?.length ?? 0) +
+          (args.appEventIds?.length ?? 0);
+        if (named === 0) {
+          throw new Error(
+            "Name at least one item: assetIds, experimentIds, customProductPageVersionIds or " +
+              "appEventIds.",
+          );
+        }
+        return submitItemsForReview(client, { ...args, dryRun });
+      }),
+  );
+
+  server.registerTool(
+    "app_store_connect_remove_submission_items",
+    {
+      title: "App Store Connect: Remove Items from Draft Submission",
+      description:
+        "Take items back off an un-submitted draft review submission (state READY_FOR_REVIEW), " +
+        "e.g. after a dryRun of app_store_connect_submit_items_for_review staged something that " +
+        "should not go. Item ids come from app_store_connect_list_review_submissions (each " +
+        "row's `items`). Drafts only: a submission already with Apple is refused, since " +
+        "withdrawing that is app_store_connect_cancel_review_submission's job. For a version " +
+        "item, app_store_connect_remove_version_from_submission also reports the version's " +
+        "state afterwards. Apple has no route that deletes a draft submission itself; an " +
+        "emptied draft stays and is reused by the next submission on that platform.",
+      inputSchema: z.object({
+        submissionId: submissionIdArg,
+        itemIds: z
+          .array(z.string().min(1))
+          .min(1)
+          .describe("The reviewSubmissionItem ids to remove."),
+        confirm: confirmArg,
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true },
+    },
+    async ({ submissionId, itemIds }) =>
+      wrap(async () => {
+        const state = attributesOf(
+          resourceOf(await client.get(`/v1/reviewSubmissions/${submissionId}`)),
+        ).state;
+        if (state !== DRAFT_STATE) {
+          throw new PreconditionError(
+            `Submission ${submissionId} is ${String(state)}, not an un-submitted draft ` +
+              `(${DRAFT_STATE}). Withdraw a submission that is with Apple with ` +
+              `app_store_connect_cancel_review_submission.`,
+            { submissionId, state },
+          );
+        }
+        const items = await readItems(client, submissionId);
+        const foreign = itemIds.filter((id) => !items.some((item) => item.id === id));
+        if (foreign.length > 0) {
+          throw new PreconditionError(
+            `Not items of submission ${submissionId}: ${foreign.join(", ")}. Nothing was removed.`,
+            { submissionId, items },
+          );
+        }
+        for (const id of itemIds) await client.del(`/v1/reviewSubmissionItems/${id}`);
+        return {
+          submissionId,
+          removed: items.filter((item) => itemIds.includes(String(item.id))),
+          remaining: items.filter((item) => !itemIds.includes(String(item.id))),
+        };
+      }),
+  );
+
+  server.registerTool(
     "app_store_connect_cancel_review_submission",
     {
       title: "App Store Connect: Cancel Review Submission",
       description:
         "Withdraw a review submission from Apple, returning its versions to an editable state. " +
+        "Works the same on an item-only submission (no version: library assets, a test, a " +
+        "custom product page, an event), whose items app_store_connect_submit_items_for_review " +
+        "can send again. " +
         "Only works while the submission is still with Apple and has not started completing; a " +
         "cancelled submission cannot be un-cancelled — submit again to re-enter the queue. " +
         "A cancel removes EVERY item on the submission, not just the version, and submitting " +
         "the version again does not bring them back. Asset-pack versions " +
         "(backgroundAssetVersion) are re-added by app_store_connect_submit_version_for_review. " +
-        "An app's first non-consumable in-app purchase, subscriptions, in-app events, custom " +
-        "product pages, experiments and Game Center items can only be put back by hand, in App " +
-        "Store Connect's Add for Review panel on the version page. Call with dryRun first: it " +
+        "Library assets, in-app events, custom product pages and product page optimization " +
+        "tests can be sent again on their own with app_store_connect_submit_items_for_review. " +
+        "An app's first non-consumable in-app purchase, subscriptions and Game Center items can " +
+        "only be put back by hand, in App Store Connect's Add for Review panel on the version " +
+        "page. Call with dryRun first: it " +
         "lists every item besides the version and how each one comes back, and cancels " +
         "nothing. A real cancel reports the same list as `otherItems`. " +
         "This is the wrong tool for a rejection: a submission in UNRESOLVED_ISSUES is already " +
@@ -1144,19 +1619,30 @@ export const registerSubmissionTools = (
         // the item list is the warning, and a cancel that could not produce it
         // is the one that strands an asset pack or a first IAP unnoticed. A
         // read that fails therefore fails the cancel.
-        const otherItems = (await readItems(client, submissionId))
+        const allItems = await readItems(client, submissionId);
+        const holdsVersion =
+          relatedId(current, "appStoreVersionForReview") !== undefined ||
+          allItems.some((item) => item.kind === "appStoreVersion");
+        const otherItems = allItems
           .filter((item) => item.kind !== "appStoreVersion" && item.state !== "REMOVED")
           .map((item) => ({ ...item, ...restoreOf(item.kind) }));
         const byHand = otherItems.filter((item) => item.restoredBy === "webUi");
         const note =
           otherItems.length === 0
             ? "The submission holds only the version, which submit_version_for_review puts back."
-            : `Cancelling removes ${otherItems.length} item(s) besides the version, and ` +
-              `resubmitting the version does not bring them back. ` +
-              (byHand.length > 0
-                ? `${byHand.length} of them can only be re-added by hand in ${WEB_UI}; see ` +
-                  `each item's \`how\`.`
-                : `submit_version_for_review re-adds all of them.`);
+            : !holdsVersion
+              ? `This is an item-only submission (no version). Cancelling removes its ` +
+                `${otherItems.length} item(s); send them again with ` +
+                `app_store_connect_submit_items_for_review. ` +
+                (byHand.length > 0
+                  ? `${byHand.length} of them can only be re-added by hand; see each item's \`how\`.`
+                  : "")
+              : `Cancelling removes ${otherItems.length} item(s) besides the version, and ` +
+                `resubmitting the version does not bring them back. ` +
+                (byHand.length > 0
+                  ? `${byHand.length} of them can only be re-added by hand in ${WEB_UI}; see ` +
+                    `each item's \`how\`.`
+                  : `submit_version_for_review re-adds all of them.`);
 
         if (dryRun) {
           return { submissionId, state, dryRun: true, canceled: false, otherItems, note };
