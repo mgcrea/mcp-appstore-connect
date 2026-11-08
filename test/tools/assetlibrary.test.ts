@@ -3,12 +3,29 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { baseConfig, connect, jsonResponse, payloadOf, textOf } from "../helpers.js";
+import {
+  baseConfig,
+  callsOf,
+  connect,
+  jsonResponse,
+  on,
+  payloadOf,
+  type Route,
+  stub,
+  textOf,
+} from "../helpers.js";
 
 const FIXTURE_PATH = fileURLToPath(new URL("../fixtures/screenshot.png", import.meta.url));
 const FIXTURE_SIZE = statSync(FIXTURE_PATH).size;
 const UPLOAD_HOST = "https://upload.appstoreconnect.example";
 const writes = { ...baseConfig, allowWrites: true };
+
+/** What a processed image carries besides its state: the rendered file. */
+const IMAGE_FILE = {
+  templateUrl: "https://is1-ssl.mzstatic.com/image/thumb/x/{w}x{h}bb.{f}",
+  width: 1320,
+  height: 2868,
+};
 
 const errorResponse = (status: number, code: string): Response =>
   new Response(JSON.stringify({ errors: [{ status: String(status), code, detail: code }] }), {
@@ -38,33 +55,7 @@ const refData = {
   ],
 };
 
-type Route = (url: URL, init: RequestInit) => Response | undefined;
-
-/**
- * A stub App Store Connect that answers by method and path, and records every
- * call. Unrouted requests fail the test loudly instead of returning `{data: []}`.
- */
-const stub = (routes: Route[]) =>
-  vi.fn(async (input: string | URL, init: RequestInit = {}) => {
-    const url = new URL(String(input));
-    for (const route of routes) {
-      const res = route(url, init);
-      if (res) return res;
-    }
-    throw new Error(`unrouted ${init.method ?? "GET"} ${url.pathname}${url.search}`);
-  });
-
-const on =
-  (method: string, path: string | RegExp, respond: (url: URL, init: RequestInit) => Response) =>
-  (url: URL, init: RequestInit): Response | undefined =>
-    (init.method ?? "GET") === method &&
-    (typeof path === "string" ? url.pathname === path : path.test(url.pathname))
-      ? respond(url, init)
-      : undefined;
-
 type Call = [string, RequestInit];
-const callsOf = (fetchImpl: ReturnType<typeof vi.fn>): Call[] =>
-  fetchImpl.mock.calls as unknown as Call[];
 const bodyOf = (call: Call | undefined): Record<string, any> =>
   JSON.parse(String(call?.[1].body ?? "{}")) as Record<string, any>;
 const find = (
@@ -128,7 +119,7 @@ const uploadArgs = {
 describe("asset library upload", () => {
   it("reserves in the library, commits without a checksum, waits, then places", async () => {
     const fetchImpl = stub(
-      uploadRoutes({ state: "PREPARE_FOR_SUBMISSION", specId: "SPEC_69", category: "x" }),
+      uploadRoutes({ state: "PREPARE_FOR_SUBMISSION", specId: "SPEC_69", imageAsset: IMAGE_FILE }),
     );
     const client = await connect(writes, fetchImpl as unknown as typeof fetch);
     const result = await client.callTool({
@@ -178,7 +169,11 @@ describe("asset library upload", () => {
 
   it("does not place an asset whose matched spec the group does not take", async () => {
     const fetchImpl = stub(
-      uploadRoutes({ state: "PREPARE_FOR_SUBMISSION", specId: "SPEC_HEADER" }),
+      uploadRoutes({
+        state: "PREPARE_FOR_SUBMISSION",
+        specId: "SPEC_HEADER",
+        imageAsset: IMAGE_FILE,
+      }),
     );
     const client = await connect(writes, fetchImpl as unknown as typeof fetch);
     const result = await client.callTool({
@@ -208,6 +203,50 @@ describe("asset library upload", () => {
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("IMAGE_INCORRECT_DIMENSIONS");
     expect(textOf(result)).toContain("app_store_connect_delete_library_asset");
+  });
+
+  it("treats COMPLETE with no file and no spec as still processing, and does not place", async () => {
+    // Recorded from Cadence: some uploads in one batch answered COMPLETE with
+    // `imageAsset: null` and no specId, while their siblings read UPLOAD_COMPLETE.
+    const fetchImpl = stub(uploadRoutes({ state: "COMPLETE", imageAsset: null }));
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_upload_library_asset",
+      arguments: { ...uploadArgs, waitSeconds: 0 },
+    });
+
+    expect(result.isError, textOf(result)).toBeFalsy();
+    const payload = payloadOf(result);
+    expect(payload).toMatchObject({ id: "img-1", state: "COMPLETE", stillProcessing: true });
+    expect(String(payload.note)).toContain("not a failure");
+    expect(String(payload.note)).toContain("app_store_connect_create_placement");
+    expect(find(fetchImpl, "POST", "/v1/appAssetLibraryPlacements")).toBeUndefined();
+  });
+
+  it("says stillProcessing on UPLOAD_COMPLETE too, the same way", async () => {
+    const fetchImpl = stub(uploadRoutes({ state: "UPLOAD_COMPLETE" }));
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_upload_library_asset",
+      arguments: {
+        appId: "app-1",
+        filePath: FIXTURE_PATH,
+        category: "CREATIVE_ASSETS",
+        waitSeconds: 0,
+      },
+    });
+
+    expect(payloadOf(result)).toMatchObject({ state: "UPLOAD_COMPLETE", stillProcessing: true });
+  });
+
+  it("defaults the wait below a 60 s client timeout", async () => {
+    const client = await connect(writes);
+    const tool = (await client.listTools()).tools.find(
+      (t) => t.name === "app_store_connect_upload_library_asset",
+    );
+    const properties = (tool?.inputSchema.properties ?? {}) as Record<string, { default?: number }>;
+    const wait = properties.waitSeconds;
+    expect(wait?.default).toBeLessThan(60);
   });
 
   it("asks for all three placement arguments or none", async () => {
@@ -340,6 +379,87 @@ describe("asset library placements", () => {
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("pl-a");
     expect(textOf(result)).toContain("app_store_connect_delete_placement");
+  });
+
+  const imageRoute = (attributes: Record<string, unknown>): Route =>
+    on("GET", "/v1/appAssetLibraryImages/img-1", () =>
+      jsonResponse({ data: { id: "img-1", type: "appAssetLibraryImages", attributes } }),
+    );
+  const placeArgs = {
+    assetId: "img-1",
+    localizationId: "loc-live",
+    placementType: "APP_SCREENSHOT",
+    placementGroup: "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE",
+  };
+
+  it("refuses to place an asset that reads COMPLETE but has no file or spec yet", async () => {
+    const fetchImpl = stub([imageRoute({ state: "COMPLETE", imageAsset: null })]);
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_create_placement",
+      arguments: placeArgs,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("still processing");
+    expect(find(fetchImpl, "POST", "/v1/appAssetLibraryPlacements")).toBeUndefined();
+  });
+
+  it("explains the 409 an approved parent gives an unapproved asset, and the route out", async () => {
+    // Recorded from Cadence: placing on the live iOS 1.10.1 localization.
+    const fetchImpl = stub([
+      imageRoute({
+        state: "PREPARE_FOR_SUBMISSION",
+        specId: "SPEC_69",
+        category: "APP_SCREENSHOTS_AND_PREVIEWS",
+        imageAsset: IMAGE_FILE,
+      }),
+      on("GET", "/v1/appAssetLibraryRefData", () => jsonResponse(refData)),
+      on(
+        "POST",
+        "/v1/appAssetLibraryPlacements",
+        () =>
+          new Response(
+            JSON.stringify({
+              errors: [
+                {
+                  status: "409",
+                  code: "ENTITY_ERROR.RELATIONSHIP.INVALID",
+                  title: "The provided entity includes a relationship with an invalid value",
+                  detail:
+                    "The asset must be in the APPROVED state because the parent is already approved.",
+                },
+              ],
+            }),
+            { status: 409, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    ]);
+    const client = await connect(writes, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_create_placement",
+      arguments: placeArgs,
+    });
+
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toContain("already approved");
+    expect(text).toContain("app_store_connect_submit_items_for_review");
+    expect(text).toContain("APPROVED");
+  });
+
+  it("flags an asset still processing when it is read", async () => {
+    const fetchImpl = stub([
+      imageRoute({ state: "COMPLETE", imageAsset: null }),
+      on("GET", "/v1/appAssetLibraryImages/img-1/placements", () => jsonResponse({ data: [] })),
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_get_library_asset",
+      arguments: { assetId: "img-1" },
+    });
+
+    expect(payloadOf(result)).toMatchObject({ state: "COMPLETE", stillProcessing: true });
   });
 
   it("finds a video by id when it is not an image", async () => {

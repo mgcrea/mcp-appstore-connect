@@ -135,3 +135,54 @@ export const notFound = (): Response =>
 
 export const bodyOf = (init: RequestInit | undefined): Record<string, unknown> =>
   JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+
+export type Route = (url: URL, init: RequestInit) => Response | undefined;
+
+/**
+ * A stub App Store Connect that answers by method and path, and records every
+ * call. Unrouted requests fail the test loudly instead of returning `{data: []}`.
+ */
+export const stub = (routes: Route[]) =>
+  vi.fn(async (input: string | URL, init: RequestInit = {}) => {
+    const url = new URL(String(input));
+    for (const route of routes) {
+      const res = route(url, init);
+      if (res) return res;
+    }
+    throw new Error(`unrouted ${init.method ?? "GET"} ${url.pathname}${url.search}`);
+  });
+
+/** One route: answer `method path` (a string matches exactly, a RegExp by test). */
+export const on =
+  (method: string, path: string | RegExp, respond: (url: URL, init: RequestInit) => Response) =>
+  (url: URL, init: RequestInit): Response | undefined =>
+    (init.method ?? "GET") === method &&
+    (typeof path === "string" ? url.pathname === path : path.test(url.pathname))
+      ? respond(url, init)
+      : undefined;
+
+export type Call = [string, RequestInit];
+
+export const callsOf = (fetchImpl: ReturnType<typeof vi.fn>): Call[] =>
+  fetchImpl.mock.calls as unknown as Call[];
+
+/** Every call made as `method path`, in order. */
+export const callsTo = (
+  fetchImpl: ReturnType<typeof vi.fn>,
+  method: string,
+  path: string,
+): Call[] =>
+  callsOf(fetchImpl).filter(
+    ([url, init]) => (init.method ?? "GET") === method && new URL(url).pathname === path,
+  );
+
+/** The JSON body a recorded call sent. */
+export const sentBody = (call: Call | undefined): Record<string, any> =>
+  JSON.parse(String(call?.[1].body ?? "{}")) as Record<string, any>;
+
+/** An App Store Connect error answer, with Apple's code and detail. */
+export const apiError = (status: number, code: string, detail = code): Response =>
+  new Response(JSON.stringify({ errors: [{ status: String(status), code, detail }] }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });

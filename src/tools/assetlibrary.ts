@@ -4,7 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 import type { AppStoreConnectClient } from "#/client/asc";
-import { AppStoreConnectApiError } from "#/client/errors";
+import { AppStoreConnectApiError, hasApiError } from "#/client/errors";
 import { sleep } from "#/client/http";
 import { includedIndex, isRecord, resourcesOf, summarizeResponse, type Rec } from "#/client/shape";
 import {
@@ -90,10 +90,42 @@ const VIDEO_EXTENSIONS = new Set([".mov", ".m4v", ".mp4"]);
 /** The states an asset passes through before it can be placed. */
 const PROCESSING_STATES = new Set(["AWAITING_UPLOAD", "UPLOAD_COMPLETE"]);
 
+/**
+ * Whether Apple has finished with the file, judged by what processing
+ * produces rather than by `state` alone.
+ *
+ * The state is not enough: uploads in one Cadence batch came back `COMPLETE`
+ * with `imageAsset: null` and no `specId`, while their siblings read
+ * `UPLOAD_COMPLETE`, and both kinds reached PREPARE_FOR_SUBMISSION with a spec
+ * later. An asset without its rendered file and matched spec cannot be checked
+ * against a placement group, so it is still processing whatever it says.
+ */
+export const isProcessed = (kind: MediaKind, attrs: Rec): boolean => {
+  const state = optString(attrs.state);
+  if (state === undefined || state === "FAILED" || PROCESSING_STATES.has(state)) return false;
+  const file = kind === "image" ? attrs.imageAsset : attrs.videoAsset;
+  return isRecord(file) && optString(attrs.specId) !== undefined;
+};
+
+/**
+ * Apple's answer to a placement of an unapproved asset on a parent that is
+ * already live: `409 ENTITY_ERROR.RELATIONSHIP.INVALID`, "The asset must be in
+ * the APPROVED state because the parent is already approved."
+ */
+const APPROVED_PARENT = { code: "ENTITY_ERROR.RELATIONSHIP.INVALID", detail: /APPROVED/ };
+
+const APPROVED_PARENT_ROUTE =
+  "A parent that is already approved (a live version's localization, a running test's " +
+  "treatment) only takes assets that are themselves APPROVED. Submit the asset on its own " +
+  "with app_store_connect_submit_items_for_review (an app with an approved version can send " +
+  "library assets to review without a new version), wait until " +
+  "app_store_connect_get_library_asset reads APPROVED, then place it. Or place it on a version " +
+  "still in PREPARE_FOR_SUBMISSION, where it is reviewed with that version.";
+
 const POLL_INTERVALS_MS = [1000, 2000, 2000, 3000, 5000];
 
-type MediaKind = "image" | "video";
-const RESOURCE: Record<MediaKind, string> = {
+export type MediaKind = "image" | "video";
+export const RESOURCE: Record<MediaKind, string> = {
   image: "appAssetLibraryImages",
   video: "appAssetLibraryVideos",
 };
@@ -276,7 +308,7 @@ const kindOfFile = (name: string): MediaKind => {
  * Read an asset by id without knowing whether it is an image or a video. The
  * two live in separate collections; an id from one 404s in the other.
  */
-const fetchAsset = async (
+export const fetchAsset = async (
   client: AppStoreConnectClient,
   assetId: string,
 ): Promise<{ kind: MediaKind; response: unknown }> => {
@@ -313,7 +345,9 @@ const libraryIdOf = async (client: AppStoreConnectClient, appId: string): Promis
 /**
  * Wait until Apple has processed the asset. Library assets report a flat
  * `state` string (AWAITING_UPLOAD → UPLOAD_COMPLETE → PREPARE_FOR_SUBMISSION),
- * not the nested `assetDeliveryState` of the old screenshot resources.
+ * not the nested `assetDeliveryState` of the old screenshot resources, and
+ * `isProcessed` decides when that is done: the state alone has read COMPLETE
+ * on an asset with no file and no spec yet.
  *
  * As there: the bytes are committed before this runs, so neither a timeout nor
  * a failed status read is a failed upload, and saying so would invite a retry
@@ -350,14 +384,15 @@ const pollLibraryAsset = async (
           `still exists — delete it with app_store_connect_delete_library_asset before retrying.`,
       );
     }
-    if (state !== undefined && !PROCESSING_STATES.has(state)) return { done: true, attrs };
+    if (isProcessed(kind, attrs)) return { done: true, attrs };
     if (Date.now() >= deadline) {
       return {
         done: false,
         attrs,
         note:
-          `Still processing after ${waitSeconds}s. The upload itself succeeded — poll ` +
-          `app_store_connect_get_library_asset for the final state.`,
+          `Still processing after ${waitSeconds}s. The upload itself succeeded, so this is not ` +
+          `a failure and the asset must NOT be uploaded again. Poll ` +
+          `app_store_connect_get_library_asset until it reports no \`stillProcessing\`.`,
       };
     }
     await sleep(POLL_INTERVALS_MS[Math.min(tick, POLL_INTERVALS_MS.length - 1)] as number);
@@ -374,17 +409,40 @@ const createPlacementRequest = async (
     placementType: string;
     placementGroup: string;
   },
-): Promise<unknown> =>
-  client.post("/v1/appAssetLibraryPlacements", {
-    data: {
-      type: "appAssetLibraryPlacements",
-      attributes: { placementType: args.placementType, placementGroup: args.placementGroup },
-      relationships: {
-        [args.kind]: { data: { type: RESOURCE[args.kind], id: args.assetId } },
-        [args.surface]: { data: { type: SURFACES[args.surface], id: args.localizationId } },
+): Promise<unknown> => {
+  try {
+    return await client.post("/v1/appAssetLibraryPlacements", {
+      data: {
+        type: "appAssetLibraryPlacements",
+        attributes: { placementType: args.placementType, placementGroup: args.placementGroup },
+        relationships: {
+          [args.kind]: { data: { type: RESOURCE[args.kind], id: args.assetId } },
+          [args.surface]: { data: { type: SURFACES[args.surface], id: args.localizationId } },
+        },
       },
-    },
-  });
+    });
+  } catch (err) {
+    if (hasApiError(err, APPROVED_PARENT.code, APPROVED_PARENT.detail)) {
+      throw new Error(
+        `Apple refused to place asset ${args.assetId} on ${args.localizationId}: the parent is ` +
+          `already approved and the asset is not. ${APPROVED_PARENT_ROUTE}`,
+        { cause: err },
+      );
+    }
+    throw err;
+  }
+};
+
+/** An asset's processing fields, plus `stillProcessing` when Apple is not done with it. */
+const processingFields = (kind: MediaKind, attrs: Rec): Rec => ({
+  state: optString(attrs.state) ?? "UNKNOWN",
+  ...compact({
+    specId: optString(attrs.specId),
+    imageAsset: attrs.imageAsset ?? undefined,
+    videoAsset: attrs.videoAsset ?? undefined,
+  }),
+  ...(isProcessed(kind, attrs) || attrs.state === "FAILED" ? {} : { stillProcessing: true }),
+});
 
 type UploadArgs = {
   appId: string;
@@ -487,16 +545,12 @@ const uploadLibraryAsset = async (
     fileName: name,
     fileSize: bytes.byteLength,
     parts: operations.length,
-    state: optString(polled.attrs.state) ?? "UNKNOWN",
-    ...compact({
-      specId: optString(polled.attrs.specId),
-      imageAsset: polled.attrs.imageAsset,
-      videoAsset: polled.attrs.videoAsset,
-    }),
+    ...processingFields(kind, polled.attrs),
   };
   if (!polled.done) {
     return {
       ...result,
+      // Also when the status read failed and left no attributes to judge by.
       stillProcessing: true,
       note:
         polled.note +
@@ -709,7 +763,10 @@ export const registerAssetLibraryTools = (
       description:
         "Get one asset library image or video by id — its state (the way to follow an upload " +
         "that was still processing), the reason if it FAILED, the specification it matched, " +
-        "and every placement that uses it.",
+        "and every placement that uses it. `stillProcessing: true` means Apple has not yet " +
+        "produced the file or matched a spec, whatever `state` reads (it has read COMPLETE " +
+        "then): wait, do not re-upload, and do not place it yet. APPROVED is what a live " +
+        "parent needs before the asset can be placed on it.",
       inputSchema: z.object({ assetId: assetIdArg, savePath: savePathArg }),
       annotations: { readOnlyHint: true },
     },
@@ -720,9 +777,11 @@ export const registerAssetLibraryTools = (
           limit: 200,
         });
         const asset = stripUploadOperations(summarizeResponse(response));
+        const processing = processingFields(kind, attributesOf(response));
         return {
           kind,
           ...(isRecord(asset) && isRecord(asset.data) ? asset.data : { data: asset }),
+          ...(processing.stillProcessing === true ? { stillProcessing: true } : {}),
           placements: summarizeResponse(placements),
         };
       }),
@@ -763,8 +822,18 @@ export const registerAssetLibraryTools = (
         "results). Reserves the asset, uploads the bytes, commits, then waits for processing " +
         "and reports the specification App Store Connect matched (specId). When placing, the " +
         "placement group is checked against the reference data before anything uploads, and " +
-        "the matched spec before the placement is created. Placements need an editable parent " +
-        "(a version in PREPARE_FOR_SUBMISSION, or back after a rejection).",
+        "the matched spec before the placement is created. " +
+        "Processing: an asset is done only once it has its file (imageAsset/videoAsset) and a " +
+        "specId; until then the result says `stillProcessing: true`, whatever `state` reads, " +
+        "and nothing is placed. The default wait (40 s) stays under a 60 s MCP client timeout " +
+        "with the transfer included. Running out of wait, or the client timing out, is NOT a " +
+        "failure: the bytes are committed, so never re-upload; poll " +
+        "app_store_connect_get_library_asset, then app_store_connect_create_placement. " +
+        "Placing on a parent still in PREPARE_FOR_SUBMISSION (or back after a rejection) " +
+        "always works. A parent that is already approved, such as a live version's " +
+        "localization, answers 409 ENTITY_ERROR.RELATIONSHIP.INVALID 'The asset must be in " +
+        "the APPROVED state': upload without placing, submit the asset alone with " +
+        "app_store_connect_submit_items_for_review, wait for APPROVED, then place it.",
       inputSchema: z.object({
         appId: appIdArg,
         filePath: z
@@ -804,7 +873,7 @@ export const registerAssetLibraryTools = (
         surface: surfaceArg,
         placementType: placementTypeArg.optional(),
         placementGroup: placementGroupArg.optional(),
-        waitSeconds: waitSecondsArg(600, 120),
+        waitSeconds: waitSecondsArg(600, 40),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -819,8 +888,16 @@ export const registerAssetLibraryTools = (
         "Place an asset already in the library on a localization, under a placement type and " +
         "group. One asset can back many placements, e.g. the same screenshot on every " +
         "localization. The group is checked against the reference data, and the asset's " +
-        "matched specification against what the group takes, before anything is created. " +
-        "The parent must be editable.",
+        "matched specification against what the group takes, before anything is created, and " +
+        "an asset still processing (no file or specId yet, whatever its state) is refused. " +
+        "Parent: one in PREPARE_FOR_SUBMISSION takes any processed asset, which is then " +
+        "reviewed with it; a draft product page optimization treatment localization (from " +
+        "app_store_connect_create_experiment) works the same way. A parent that is already " +
+        "approved, such as a live version's localization, only takes an APPROVED asset, and " +
+        "Apple answers anything else 409 ENTITY_ERROR.RELATIONSHIP.INVALID 'The asset must be " +
+        "in the APPROVED state because the parent is already approved'. The route there: " +
+        "submit the asset on its own with app_store_connect_submit_items_for_review, wait for " +
+        "APPROVED (app_store_connect_get_library_asset), then place it.",
       inputSchema: z.object({
         assetId: assetIdArg,
         localizationId: localizationIdArg,
@@ -835,12 +912,19 @@ export const registerAssetLibraryTools = (
         const { kind, response } = await fetchAsset(client, args.assetId);
         const attrs = attributesOf(response);
         const state = optString(attrs.state);
-        if (state === "FAILED" || (state !== undefined && PROCESSING_STATES.has(state))) {
+        if (state === "FAILED") {
           throw new Error(
-            `Asset ${args.assetId} is ${state}, so it cannot be placed` +
-              (state === "FAILED"
-                ? `: ${describeDetails(attrs) || "App Store Connect gave no reason"}.`
-                : ` yet. Wait for processing with app_store_connect_get_library_asset.`),
+            `Asset ${args.assetId} is FAILED, so it cannot be placed: ` +
+              `${describeDetails(attrs) || "App Store Connect gave no reason"}.`,
+          );
+        }
+        if (!isProcessed(kind, attrs)) {
+          throw new Error(
+            `Asset ${args.assetId} is still processing (state ${state ?? "unknown"}, ` +
+              `${optString(attrs.specId) ? "" : "no specId, "}` +
+              `${isRecord(kind === "image" ? attrs.imageAsset : attrs.videoAsset) ? "" : "no file yet, "}` +
+              `so it cannot be placed yet. Wait with app_store_connect_get_library_asset until it ` +
+              `reports no stillProcessing; do not re-upload it.`,
           );
         }
         checkPlacement(await placementTypeRef(client, args.placementType), args.placementGroup, {

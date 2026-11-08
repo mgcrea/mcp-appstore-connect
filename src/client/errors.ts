@@ -52,6 +52,22 @@ export class AppStoreConnectApiError extends Error {
   }
 }
 
+/**
+ * Whether `err` is an App Store Connect answer carrying this error code, and,
+ * when `detail` is given, a detail matching it. Tools use it to swap a terse
+ * Apple refusal for one that names the route out; anything else rethrows as is.
+ */
+export const hasApiError = (err: unknown, code: string, detail?: RegExp): boolean =>
+  err instanceof AppStoreConnectApiError &&
+  Array.isArray(err.errors) &&
+  (err.errors as AppStoreConnectError[]).some(
+    (e) =>
+      typeof e === "object" &&
+      e !== null &&
+      e.code === code &&
+      (detail === undefined || detail.test(`${e.detail ?? ""} ${e.title ?? ""}`)),
+  );
+
 /** Thrown when a write tool is reached while APP_STORE_CONNECT_ALLOW_WRITES is off. */
 export class WritesDisabledError extends Error {
   override readonly name = "WritesDisabledError";
