@@ -290,14 +290,26 @@ const summarizeSubmissions = (
 type ItemDetails = { details: Map<string, ItemSummary[]>; failed: string[] };
 
 /**
- * Whether a submission carries no version. Read off both the submission's own
- * `appStoreVersionForReview` and its items, since a draft can hold a version
- * item before Apple fills in the former.
+ * Whether a submission holds a version, judged by its items first. A version
+ * goes to review as an item, and a draft can hold that item before Apple fills
+ * in `appStoreVersionForReview`. The relationship alone proves nothing: Apple
+ * links even an item-only submission to the app's live version (measured on
+ * Filiation, 2026-11-17: a draft holding only library images, linked to the
+ * READY_FOR_SALE 1.2.0). So once every item is known and none is a version, it
+ * holds none; only with no items, or one whose kind Apple did not name, does
+ * the relationship decide.
  */
+const holdsVersion = (submission: Rec, items: ItemSummary[]): boolean => {
+  if (items.some((item) => item.kind === "appStoreVersion")) return true;
+  if (items.length > 0 && items.every((item) => item.kind !== undefined)) return false;
+  return relatedId(submission, "appStoreVersionForReview") !== undefined;
+};
+
+/** Whether a submission holds items, every one of a kind Apple named, and no version. */
 const isItemOnly = (submission: Rec, items: ItemSummary[]): boolean =>
-  relatedId(submission, "appStoreVersionForReview") === undefined &&
   items.length > 0 &&
-  items.every((item) => item.kind !== undefined && item.kind !== "appStoreVersion");
+  items.every((item) => item.kind !== undefined) &&
+  !holdsVersion(submission, items);
 
 /** How many submissions' items are read at once, so a long list does not burst Apple's rate limit. */
 const ITEM_READ_CONCURRENCY = 5;
@@ -880,11 +892,8 @@ const findItemOnlyDraft = async (
     const id = String(submission.id);
     const state = String(attributesOf(submission).state);
     const items = await readItems(client, id);
-    const holdsVersion =
-      relatedId(submission, "appStoreVersionForReview") !== undefined ||
-      items.some((item) => item.kind === "appStoreVersion");
 
-    if (holdsVersion) {
+    if (holdsVersion(submission, items)) {
       if (state === DRAFT_STATE) {
         throw new PreconditionError(
           `This app's ${platform} draft submission ${id} holds a version, so items added to it ` +
@@ -1620,9 +1629,7 @@ export const registerSubmissionTools = (
         // is the one that strands an asset pack or a first IAP unnoticed. A
         // read that fails therefore fails the cancel.
         const allItems = await readItems(client, submissionId);
-        const holdsVersion =
-          relatedId(current, "appStoreVersionForReview") !== undefined ||
-          allItems.some((item) => item.kind === "appStoreVersion");
+        const withVersion = holdsVersion(current, allItems);
         const otherItems = allItems
           .filter((item) => item.kind !== "appStoreVersion" && item.state !== "REMOVED")
           .map((item) => ({ ...item, ...restoreOf(item.kind) }));
@@ -1630,7 +1637,7 @@ export const registerSubmissionTools = (
         const note =
           otherItems.length === 0
             ? "The submission holds only the version, which submit_version_for_review puts back."
-            : !holdsVersion
+            : !withVersion
               ? `This is an item-only submission (no version). Cancelling removes its ` +
                 `${otherItems.length} item(s); send them again with ` +
                 `app_store_connect_submit_items_for_review. ` +

@@ -270,6 +270,53 @@ describe("submit_items_for_review", () => {
     });
   });
 
+  // Apple links a draft it created for items alone to the app's live version
+  // (Filiation, 2026-11-17: library images only, linked to the READY_FOR_SALE
+  // 1.2.0). Read as "holds a version", that link stranded the draft: the dry
+  // run staged the items, and the call meant to submit them was refused.
+  it("resumes its own item-only draft that Apple linked to the live version", async () => {
+    const fetchImpl = stub([
+      ...image(HEADER, { ...processedHeader, state: "READY_FOR_REVIEW" }),
+      ...image(SCREENSHOT, { ...processedHeader, category: "APP_SCREENSHOTS_AND_PREVIEWS" }),
+      ...openSubmissions([submission("sub-draft", "READY_FOR_REVIEW", "ver-live")], {
+        "sub-draft": [item("i1", "appAssetLibraryImage", "appAssetLibraryImages", HEADER)],
+      }),
+      ...submitRoutes,
+    ]);
+    const result = await call(fetchImpl, { assetIds: [HEADER, SCREENSHOT] });
+
+    expect(result.isError, textOf(result)).toBeFalsy();
+    expect(callsTo(fetchImpl, "POST", "/v1/reviewSubmissions")).toHaveLength(0);
+    expect(callsTo(fetchImpl, "POST", "/v1/reviewSubmissionItems")).toHaveLength(1);
+    expect(callsTo(fetchImpl, "PATCH", "/v1/reviewSubmissions/sub-draft")).toHaveLength(1);
+    expect(payloadOf(result)).toMatchObject({
+      submissionId: "sub-draft",
+      reusedDraft: true,
+      items: [
+        { id: HEADER, action: "alreadyOnSubmission" },
+        { id: SCREENSHOT, action: "added" },
+      ],
+    });
+  });
+
+  it("still refuses a draft linked to a version once that version is one of its items", async () => {
+    const fetchImpl = stub([
+      ...image(HEADER, processedHeader),
+      ...openSubmissions([submission("sub-draft", "READY_FOR_REVIEW", "ver-2")], {
+        "sub-draft": [
+          item("i1", "appAssetLibraryImage", "appAssetLibraryImages", SCREENSHOT),
+          item("i2", "appStoreVersion", "appStoreVersions", "ver-2"),
+        ],
+      }),
+      ...submitRoutes,
+    ]);
+    const result = await call(fetchImpl, { assetIds: [HEADER] });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("holds a version");
+    expect(callsTo(fetchImpl, "POST", "/v1/reviewSubmissionItems")).toHaveLength(0);
+  });
+
   it("reports Apple's refusal of an item and submits nothing", async () => {
     const fetchImpl = stub([
       ...image(HEADER, processedHeader),
@@ -347,6 +394,38 @@ describe("item-only submissions elsewhere", () => {
       itemOnly: true,
       items: [{ kind: "appAssetLibraryImage", targetId: HEADER }],
     });
+  });
+
+  it("lists an item-only submission as such even when Apple links it to the live version", async () => {
+    const fetchImpl = stub([
+      on("GET", "/v1/reviewSubmissions", () =>
+        jsonResponse({
+          data: [
+            {
+              ...submission("sub-items", "READY_FOR_REVIEW", "ver-live"),
+              relationships: {
+                app: { data: { type: "apps", id: "app-1" } },
+                appStoreVersionForReview: { data: { type: "appStoreVersions", id: "ver-live" } },
+                items: { data: [{ type: "reviewSubmissionItems", id: "i1" }] },
+              },
+            },
+          ],
+        }),
+      ),
+      on("GET", "/v1/reviewSubmissions/sub-items/items", () =>
+        jsonResponse({
+          data: [item("i1", "appAssetLibraryImage", "appAssetLibraryImages", HEADER)],
+        }),
+      ),
+    ]);
+    const client = await connect(baseConfig, fetchImpl as unknown as typeof fetch);
+    const result = await client.callTool({
+      name: "app_store_connect_list_review_submissions",
+      arguments: { appId: "app-1" },
+    });
+
+    const row = (payloadOf(result).data as Record<string, unknown>[])[0];
+    expect(row).toMatchObject({ itemOnly: true, appStoreVersionForReview: "ver-live" });
   });
 
   it("cancel's dryRun says an item-only submission's items come back through the API", async () => {
