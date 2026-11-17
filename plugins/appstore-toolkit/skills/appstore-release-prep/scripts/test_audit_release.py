@@ -64,6 +64,56 @@ class ReleaseBoundaryTest(unittest.TestCase):
         self.assertEqual(subjects, ["feat: share sheet"])
 
 
+class GoldenChangesTest(unittest.TestCase):
+    """Store images are uploaded separately from everything a release pushes, so a
+    release whose goldens moved goes to review with the last version's pictures.
+    Cadence 1.12.0 did, with every other section of the audit clean."""
+
+    def make_repo(self):
+        repo = tempfile.mkdtemp(prefix="audit-goldens-")
+        git(repo, "init", "-q")
+
+        def commit(message, files):
+            for rel, text in files.items():
+                write(repo, rel, text)
+            git(repo, "add", "-A")
+            git(repo, "commit", "-q", "-m", message)
+
+        cfg = '{"platform": "ios", "screens": [{"id": "transcript"}]}'
+        commit("feat: first", {"CHANGELOG.md": "# Changelog\n\n## [1.0.0] - Unreleased\n",
+                               "Screenshots/ios/screenshots.config.json": cfg,
+                               "Screenshots/ios/golden/iphone/transcript~dark.png": "v1",
+                               "Screenshots/macos/screenshots.config.json": '{"screens": []}',
+                               "Screenshots/macos/golden/main~dark.png": "v1"})
+        commit("release: cut 1.0.0", {"CHANGELOG.md": "# Changelog\n\n## [1.0.0] - 2026-01-01\n"})
+        return repo, commit
+
+    def test_flags_goldens_moved_since_the_release_and_only_that_platform(self):
+        repo, commit = self.make_repo()
+        commit("chore: iPhone goldens for 1.1",
+               {"Screenshots/ios/golden/iphone/transcript~dark.png": "v2"})
+
+        changes = audit(repo)["golden_changes"]
+
+        self.assertEqual([c["config"] for c in changes], ["Screenshots/ios/screenshots.config.json"])
+        self.assertEqual([c["subject"] for c in changes[0]["commits"]],
+                         ["chore: iPhone goldens for 1.1"])
+        self.assertEqual(changes[0]["since_version"], "1.0.0")
+
+    def test_counts_an_accept_not_committed_yet(self):
+        repo, _ = self.make_repo()
+        write(repo, "Screenshots/macos/golden/main~dark.png", "v2")
+
+        changes = audit(repo)["golden_changes"]
+
+        self.assertEqual([(c["config"], c["uncommitted"], c["commits"]) for c in changes],
+                         [("Screenshots/macos/screenshots.config.json", 1, [])])
+
+    def test_silent_when_nothing_moved(self):
+        repo, _ = self.make_repo()
+        self.assertEqual(audit(repo)["golden_changes"], [])
+
+
 class LiveFieldsTest(unittest.TestCase):
     """SKILL.md says --live-fields takes export_listing's JSON document, whose
     fields sit under locales[<locale>], not at the top level."""

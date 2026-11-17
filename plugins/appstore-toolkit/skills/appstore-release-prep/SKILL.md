@@ -23,9 +23,9 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/audit_release.py --repo <repo>   # add --jso
 It reports: the shipping version and the last documented one, the release boundary
 commit and everything since it, commits that shipped in the _last_ release but were
 never announced, every store field measured against Apple's limit, em dashes in
-prose, screenshot-config drift, and the captions of any cross-platform family images
-(listed for you to check, never judged). It exits non-zero if a field is over or missing,
-so it can gate a release.
+prose, screenshot-config drift, goldens that changed since the last release, and the
+captions of any cross-platform family images (listed for you to check, never judged). It
+exits non-zero if a field is over or missing, so it can gate a release.
 
 The source is auto-detected: a metadata tree wins, else `APPSTORE.md`, `STORES.md`
 and friends. Trees are found from every `.listing.json`, plus `fastlane/metadata/` or
@@ -324,6 +324,22 @@ there means the PNGs are now stale; **say so**, since regenerating them is a sep
 step the user has to run. The `appshot-screenshot-pipeline` skill covers actually
 regenerating them. A family image with a slot in the Mac config's `screens[]` is
 composed into the Mac set's `appstore/` directory with the rest, numbered by its slot.
+
+**The pictures go stale with no caption changing at all, and this is the one that slips.**
+A new version starts with the previous version's placements copied onto it, so a release
+whose UI changed goes to review with the old screenshots, and the page looks complete. The
+audit cannot see the store, so it reports the next best thing: under SCREENSHOTS, `! the
+goldens changed`, with each commit that moved a platform's goldens since the last release
+was cut (and any golden edit not committed yet). When it says so, treat it as part of the
+release, not a follow-up: compose the store set from the goldens (`appshot compose appstore
+--source <platform>/golden`; `source/` in a given checkout may be older than the accepted
+baseline), then `list_placements` on each version localization, and replace what is placed
+**before** the version is submitted. Once it is `WAITING_FOR_REVIEW` it takes no new media,
+and the only ways back are withdrawing it or an item-only submission after release. Cadence
+1.12.0 went to review on 2026-11-17 with 1.11's iPhone and iPad screenshots: its goldens had
+been re-accepted for the new library bar the day before, the website already showed them,
+and every other check was clean. An app preview cut `--from-stills` from those captures is
+stale the same way.
 
 **Store media lives in the App Asset Library** (API 4.5.1, which deprecated screenshot and
 preview sets). Each image or video is uploaded once into the app's library, then _placed_

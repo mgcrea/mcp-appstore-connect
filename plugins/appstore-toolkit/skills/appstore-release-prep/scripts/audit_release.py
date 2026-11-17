@@ -971,7 +971,10 @@ def find_screenshot_configs(repo):
     """
     out = []
     for root, dirs, files in os.walk(repo):
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "node_modules"]
+        # Build products hold other projects' files: Cadence's report listed a
+        # FluidAudio JSON from build/SourcePackages as one of its screenshot configs.
+        dirs[:] = [d for d in dirs if not d.startswith(".")
+                   and d not in ("node_modules", "build", "DerivedData", "SourcePackages")]
         for f in files:
             if "screenshot" in f.lower() and f.endswith(".json") and f != "manifest.json":
                 out.append(os.path.relpath(os.path.join(root, f), repo))
@@ -1100,6 +1103,41 @@ def video_claims(repo, config_rel):
             "stale_screens": stale,
         })
     return {"config": config_rel, "videos": out}
+
+
+def golden_changes(repo, config_rel, boundary, version):
+    """Commits that changed a platform's screenshot goldens since the last release.
+
+    The store images are composed from the captures the goldens hold, and they reach
+    App Store Connect by a separate upload that nothing in a release path performs.
+    A new version starts with the previous version's placements copied onto it, so a
+    release whose goldens moved goes to review with the old pictures, looking
+    complete. Cadence 1.12.0 did exactly that (2026-11-17): its iPhone goldens were
+    re-accepted for the new library bar and Select, the website got the new images,
+    and the store kept 1.11's. Every other section of this audit was clean.
+
+    This cannot see the store, so it does not say the images ARE stale, only that
+    the captures moved after the last release was cut: someone has to compare with
+    `list_placements`. Uncommitted golden edits count too, since an accept that has
+    not been committed yet is the newest baseline of all.
+    """
+    golden = os.path.join(os.path.dirname(config_rel), "golden")
+    if not os.path.isdir(os.path.join(repo, golden)):
+        return None
+    commits = []
+    if boundary:
+        log = sh(["git", "log", "--format=%h\x1f%ad\x1f%s", "--date=short",
+                  f"{boundary}..HEAD", "--", golden], repo)
+        for line in log.splitlines():
+            sha, _, rest = line.partition("\x1f")
+            date, _, subject = rest.partition("\x1f")
+            commits.append({"sha": sha, "date": date, "subject": subject})
+    dirty = [l[3:] for l in sh(["git", "status", "--porcelain", "--", golden], repo).splitlines()
+             if l.strip()]
+    if not commits and not dirty:
+        return None
+    return {"config": config_rel, "golden": golden, "since_version": version,
+            "commits": commits, "uncommitted": len(dirty)}
 
 
 # --------------------------------------------------------------------------
@@ -1232,6 +1270,11 @@ def audit(repo, fields_file=None, live_fields=None, locale=None, metadata_root=N
         "screenshots": [r for r in (screenshot_sync(repo, c, doc_for(c)) for c in cfgs) if r],
         "family": [family_claims(repo, c) for c in find_family_configs(repo)],
         "videos": [r for r in (video_claims(repo, c) for c in cfgs) if r],
+        # Only against a real release: before the first one there are no store
+        # images to be stale, and the changelog-edit boundary means nothing here.
+        "golden_changes": [r for r in (golden_changes(
+            repo, c, boundary if boundary_kind == "release" else None, last_released)
+            for c in cfgs) if r],
     }
 
 
@@ -1377,8 +1420,34 @@ def report(a):
         L.append(f"  ({len(cl_em)} more in CHANGELOG.md -- developer-facing, so optional)")
     L.append("")
 
+    moved = {g["config"]: g for g in a.get("golden_changes") or []}
+
+    def golden_lines(g):
+        # Printed under the config's own SCREENSHOTS block, because "in sync with the
+        # doc" there is about captions only and reads as an all-clear for the images.
+        n = len(g["commits"])
+        what = []
+        if n:
+            last = g["commits"][0]
+            what.append(f"{n} commit(s) since {g['since_version']}, latest {last['sha']}"
+                        f" {last['date']} {last['subject'][:60]}")
+        if g["uncommitted"]:
+            what.append(f"{g['uncommitted']} uncommitted golden file(s)")
+        return [
+            f"  ! the goldens changed ({'; '.join(what)}).",
+            "    The store images are composed from them and uploaded separately, and a new",
+            "    version starts with the last one's placements: compare list_placements on",
+            "    each version localization, recompose (compose appstore) and replace the set",
+            "    BEFORE submitting. A version in review takes no new media. A preview video",
+            "    cut from these captures is stale the same way.",
+        ]
+
+    seen = set()
     for sc in a["screenshots"] or []:
         L.append(f"SCREENSHOTS  ({sc['config']})")
+        if sc["config"] in moved:
+            L += golden_lines(moved[sc["config"]])
+            seen.add(sc["config"])
         if sc.get("error"):
             L.append(f"  ! {sc['error']}")
         elif sc.get("undocumented"):
@@ -1392,6 +1461,11 @@ def report(a):
                 L.append(f"      {d['screen']}.{d['key']}: {d['config_value'][:80]}")
         else:
             L.append(f"  {len(sc['screens'])} screen(s), in sync with the doc")
+    for cfg, g in moved.items():
+        # A config with no store doc to sync against still drives store images.
+        if cfg not in seen:
+            L.append(f"SCREENSHOTS  ({cfg})")
+            L += golden_lines(g)
     if len(a["screenshots"] or []) > 1:
         L.append("  Several configs: each drives its own platform's store images, and a screen")
         L.append("  present here is NOT proof the feature is reachable on that platform. A")
